@@ -1,0 +1,16 @@
+services:
+  musicbot:
+    container_name: musicbot
+    build: .
+    restart: unless-stopped
+    volumes:
+      - ./config:/config
+    environment:
+      - DISCORD_TOKEN=xxxxxxxxxxxxxxxxxxxx
+      - CLIENT_ID=xxxxxxxxxxxxxxxxxxxx
+      - GUILD_ID=xxxxxxxxxxxxxxxxxxxx
+      - SPOTIFY_CLIENT_ID=xxxxxxxxxxxxxxxxxxxx
+      - SPOTIFY_CLIENT_SECRET=xxxxxxxxxxxxxxxxxxxx
+      - STATUS=/play
+      - EMBED_COLOR=#14c4ff
+      - COOKIES_FILE=/config/cookies.txt

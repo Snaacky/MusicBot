@@ -8,6 +8,8 @@ const PlayerStateManager = require('./src/PlayerStateManager');
 const MusicPlayer = require('./src/MusicPlayer');
 const chalk = require('chalk');
 
+if (!config.ytdl.poToken && (config.ytdl.cookiesFromBrowser || config.ytdl.cookiesFile)) console.log('✅ Loaded cookies will be passed to yt-dlp');
+
 require("./src/commandLoader"); // Load and deploy commands
 
 // Clean up audio cache directory on startup
@@ -18,7 +20,7 @@ async function cleanupAudioCache() {
         if (fs.existsSync(cacheDir)) {
             const files = await fsPromises.readdir(cacheDir);
             const protectedFiles = PlayerStateManager.getProtectedCacheFiles();
-            
+
             let deletedCount = 0;
             let skippedCount = 0;
 
@@ -56,7 +58,7 @@ async function restoreSavedPlayers(client) {
         try {
             // Wait for guild to be available in cache
             let guild = client.guilds.cache.get(guildId);
-            
+
             if (!guild) {
                 // Try fetching with retry logic for sharding
                 let retries = 3;
@@ -209,7 +211,7 @@ setTimeout(() => {
     client.once(Events.ClientReady, async () => {
         console.log(chalk.green(`✅ [SHARD ${client.shard?.ids[0] ?? 0}] ${client.user.tag} is online and ready!`));
         console.log(chalk.cyan(`🎵 [SHARD ${client.shard?.ids[0] ?? 0}] Music bot serving ${client.guilds.cache.size} servers on this shard!`));
-        
+
         // Log total guild count across all shards (only if running with sharding)
         // Wait a bit to ensure all shards are ready before fetching
         if (client.shard) {
@@ -423,8 +425,8 @@ setTimeout(() => {
         }
 
         // Handle fetch/network termination errors - don't crash
-        if (error.message && (error.message.includes('terminated') || 
-            error.message.includes('ECONNRESET') || 
+        if (error.message && (error.message.includes('terminated') ||
+            error.message.includes('ECONNRESET') ||
             error.message.includes('ETIMEDOUT'))) {
             console.log(chalk.yellow('⚠️ Network error occurred, but bot continues running...'));
             return;
@@ -467,18 +469,18 @@ setTimeout(() => {
                         }));
                     }
                 }
-                
+
                 await Promise.all(savePromises);
                 // Give time for saves to complete
                 await new Promise(resolve => setTimeout(resolve, 1000));
-                
+
                 process.exit(0);
             };
 
             // Register shutdown handlers
             process.on('SIGINT', () => gracefulShutdown('SIGINT'));
             process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-            
+
             // Windows specific handlers
             if (process.platform === 'win32') {
                 const readline = require('readline');

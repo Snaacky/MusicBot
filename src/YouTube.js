@@ -3,17 +3,16 @@ const config = require('../config');
 const LanguageManager = require('./LanguageManager');
 
 class YouTube {
-    // yt-dlp için ortak parametreleri döndüren yardımcı fonksiyon
     static getYtDlpOptions(extraOptions = {}) {
         const baseOptions = {
             noCheckCertificates: true,
             noWarnings: true,
             retries: 3,
             fragmentRetries: 3,
-            // User-Agent header ekle
+            jsRuntimes: 'deno',
             addHeader: [
                 'referer:youtube.com',
-                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.3'
             ],
             ...extraOptions
         };
