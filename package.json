@@ -7,8 +7,7 @@
   "scripts": {
     "start": "node index.js",
     "shard": "node shard.js",
-    "test": "node --check index.js",
-    "postinstall": "node scripts/update-ytdlp.js"
+    "test": "node --check index.js"
   },
   "keywords": [
     "discord",
