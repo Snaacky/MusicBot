@@ -1,7 +1,7 @@
 services:
   musicbot:
     container_name: musicbot
-    build: .
+    image: ghcr.io/snaacky/musicbot:latest
     restart: unless-stopped
     volumes:
       - ./config:/config
