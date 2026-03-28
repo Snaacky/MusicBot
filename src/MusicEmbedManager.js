@@ -152,9 +152,32 @@ class MusicEmbedManager {
     /**
      * Yeni müzik embed'i oluşturur (çalan müzik yokken)
      */
+    getTrackRequesterId(track) {
+        return track?.requestedBy?.id || track?.requesterId || null;
+    }
+
+    async disableCurrentNowPlayingMessage(player) {
+        if (!player?.nowPlayingMessage) return;
+
+        try {
+            const disabledButtons = await this.createControlButtons(player, true);
+            await player.nowPlayingMessage.edit({
+                components: disabledButtons
+            });
+        } catch (error) {
+            console.error('Error disabling previous now playing message:', error);
+        }
+    }
+
     async createNewMusicEmbed(player, track, member, interaction) {
-        const embed = await this.createNowPlayingEmbed(player, track, member.guild.id);
+        player.requesterId = this.getTrackRequesterId(track) || member?.id || null;
+
+        const embed = await this.createNowPlayingEmbed(player, track, player.guild.id);
         const buttons = await this.createControlButtons(player);
+
+        if (!interaction) {
+            await this.disableCurrentNowPlayingMessage(player);
+        }
 
         let message;
         if (interaction) {
@@ -168,7 +191,6 @@ class MusicEmbedManager {
         }
 
         player.nowPlayingMessage = message;
-        player.requesterId = member.id;
 
         return { success: true, message: 'Now playing', isNewEmbed: true };
     }
@@ -194,7 +216,9 @@ class MusicEmbedManager {
             }
         } else {
             infoMessage = await player.textChannel.send({ content: messageText });
+            return { success: true, message: 'Added to queue', isNewEmbed: false };
         }
+        return { success: true, message: 'Added to queue', isNewEmbed: false };
 
         // Bilgi mesajını 10 saniye sonra sil
         setTimeout(async () => {
@@ -302,6 +326,7 @@ class MusicEmbedManager {
         if (!player.nowPlayingMessage || !player.currentTrack) return;
 
         try {
+            player.requesterId = this.getTrackRequesterId(player.currentTrack) || player.requesterId;
             const embed = await this.createNowPlayingEmbed(player, player.currentTrack, player.guild.id);
             const buttons = await this.createControlButtons(player);
 
@@ -324,7 +349,7 @@ class MusicEmbedManager {
             player.currentTrack = nextTrack;
 
             await player.play();
-            await this.updateNowPlayingEmbed(player);
+            await this.createNewMusicEmbed(player, player.currentTrack);
         } else {
             // Tüm şarkılar bitti
             await this.handlePlaybackEnd(player);
@@ -346,6 +371,11 @@ class MusicEmbedManager {
                 console.error('Error disabling buttons:', error);
             }
         }
+
+        player.currentTrack = null;
+        player.nowPlayingMessage = null;
+        player.requesterId = null;
+        return;
 
         let endEmbed = null;
         const guildId = player.guild?.id;
@@ -386,6 +416,7 @@ class MusicEmbedManager {
         // Player'ı temizle
         player.currentTrack = null;
         player.nowPlayingMessage = null;
+        player.requesterId = null;
     }
 
     /**

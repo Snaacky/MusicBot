@@ -1565,7 +1565,7 @@ class MusicPlayer {
 
                 const MusicEmbedManager = require('./MusicEmbedManager');
                 if (global.clients && global.clients.musicEmbedManager) {
-                    await global.clients.musicEmbedManager.updateNowPlayingEmbed(this);
+                    await global.clients.musicEmbedManager.createNewMusicEmbed(this, this.currentTrack);
                 }
 
                 return;
@@ -1709,7 +1709,7 @@ class MusicPlayer {
             // Update now playing embed for autoplay track
             const MusicEmbedManager = require('./MusicEmbedManager');
             if (global.clients && global.clients.musicEmbedManager) {
-                await global.clients.musicEmbedManager.updateNowPlayingEmbed(this);
+                await global.clients.musicEmbedManager.createNewMusicEmbed(this, this.currentTrack);
             }
 
         } catch (error) {
@@ -1856,22 +1856,14 @@ class MusicPlayer {
         if (!this.nowPlayingMessage || !this.textChannel) return;
 
         try {
-            const completedTitle = await LanguageManager.getTranslation(this.guild.id, 'musicplayer.queue_completed');
-            const completedDesc = await LanguageManager.getTranslation(this.guild.id, 'musicplayer.queue_completed_desc');
-
-            const embed = new EmbedBuilder()
-                .setTitle(completedTitle)
-                .setDescription(completedDesc)
-                .setColor('#00ff00')
-                .setTimestamp();
-
-            // Create disabled buttons
             const disabledButtons = await this.createControlButtons(true);
-
             await this.nowPlayingMessage.edit({
-                embeds: [embed],
                 components: disabledButtons
             });
+
+            this.nowPlayingMessage = null;
+            this.requesterId = null;
+            return;
 
         } catch (error) {
             // Message might be deleted, clear reference
