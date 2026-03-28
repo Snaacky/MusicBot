@@ -1592,16 +1592,6 @@ class MusicPlayer {
             if (this.guild?.id) {
                 await PlayerStateManager.removeState(this.guild.id);
             }
-
-            setTimeout(() => {
-                if (this.queue.length === 0 && !this.currentTrack) {
-                    this.cleanup();
-                    const clientInstance = this.guild?.client;
-                    if (clientInstance?.players) {
-                        clientInstance.players.delete(this.guild.id);
-                    }
-                }
-            }, 10000);
         } finally {
             this.isTransitioning = false;
             this.skipRequested = false;
