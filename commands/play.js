@@ -12,6 +12,11 @@ module.exports = {
             option.setName('query')
                 .setDescription('Song name, artist, YouTube/Spotify/SoundCloud URL or direct link')
                 .setRequired(true)
+        )
+        .addBooleanOption(option =>
+            option.setName('playlist')
+                .setDescription('Allow playlist-style links to play')
+                .setRequired(false)
         ),
 
     async execute(interaction, client) {
@@ -21,7 +26,9 @@ module.exports = {
                 await interaction.deferReply();
             }
 
-            const query = interaction.options.getString('query');
+            const rawQuery = interaction.options.getString('query');
+            const allowPlaylist = interaction.options.getBoolean('playlist') ?? false;
+            const query = this.normalizeQuery(rawQuery, allowPlaylist);
             const member = interaction.member;
             const guild = interaction.guild;
             const channel = interaction.channel;
@@ -115,6 +122,31 @@ module.exports = {
         }
 
         return { success: true };
+    },
+
+    normalizeQuery(query, allowPlaylist = false) {
+        if (allowPlaylist || !query || typeof query !== 'string') {
+            return query;
+        }
+
+        if (!query.includes('youtube.com') && !query.includes('youtu.be')) {
+            return query;
+        }
+
+        try {
+            const url = new URL(query);
+            url.searchParams.delete('pp');
+
+            const normalizedQuery = url.toString();
+            return normalizedQuery.endsWith('?')
+                ? normalizedQuery.slice(0, -1)
+                : normalizedQuery;
+        } catch (error) {
+            return query.replace(/([?&])pp=[^&#]+&?/i, (match, prefix) => prefix === '?' ? '?' : '')
+                .replace(/\?&/, '?')
+                .replace(/&&+/g, '&')
+                .replace(/[?&]$/, '');
+        }
     },
 
     async getTrackData(query, guildId) {
