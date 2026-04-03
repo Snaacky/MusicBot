@@ -107,7 +107,7 @@ class YouTube {
 
     static async getInfo(url, guildId = null) {
         try {
-
+            const requestedStartSeconds = this.extractStartTimeSeconds(url);
 
             const info = await youtubedl(url, this.getYtDlpOptions({
                 dumpSingleJson: true,
@@ -137,6 +137,9 @@ class YouTube {
                 formats: info.formats,
             };
 
+            if (requestedStartSeconds > 0) {
+                track.startOffsetMs = requestedStartSeconds * 1000;
+            }
 
             return track;
 
@@ -171,6 +174,7 @@ class YouTube {
             let finalUrl = baseUrl;
 
             const seekSeconds = Math.max(0, Number(startSeconds) || 0);
+            const seekAppliedInSource = seekSeconds > 0 && canSeek;
             if (seekSeconds > 0 && canSeek) {
                 const startMs = Math.floor(seekSeconds * 1000);
                 const separator = baseUrl.includes('?') ? '&' : '?';
@@ -184,6 +188,7 @@ class YouTube {
                 duration: info.duration || 0,
                 bitrate: info.abr || info.tbr || 0,
                 canSeek,
+                seekAppliedInSource,
                 format: info.format,
                 httpHeaders: info.http_headers || {}
             };
@@ -335,6 +340,74 @@ class YouTube {
     static extractPlaylistId(url) {
         const match = url.match(/[&?]list=([a-zA-Z0-9_-]+)/);
         return match ? match[1] : null;
+    }
+
+    static extractStartTimeSeconds(url) {
+        if (!url || typeof url !== 'string') return 0;
+
+        try {
+            const parsedUrl = new URL(url);
+            const candidates = [
+                parsedUrl.searchParams.get('t'),
+                parsedUrl.searchParams.get('start'),
+                parsedUrl.searchParams.get('time_continue'),
+            ];
+
+            if (parsedUrl.hash) {
+                const hash = parsedUrl.hash.replace(/^#/, '');
+                const hashParams = new URLSearchParams(hash);
+                candidates.push(hashParams.get('t'));
+                candidates.push(hashParams.get('start'));
+            }
+
+            for (const candidate of candidates) {
+                const seconds = this.parseTimeToSeconds(candidate);
+                if (seconds > 0) {
+                    return seconds;
+                }
+            }
+        } catch (error) {
+            const match = url.match(/(?:[?&#](?:t|start|time_continue)=)([^&#]+)/i);
+            if (match) {
+                return this.parseTimeToSeconds(match[1]);
+            }
+        }
+
+        return 0;
+    }
+
+    static parseTimeToSeconds(value) {
+        if (value === null || value === undefined) return 0;
+
+        const normalized = String(value).trim().toLowerCase();
+        if (!normalized) return 0;
+
+        if (/^\d+$/.test(normalized)) {
+            return Math.max(0, parseInt(normalized, 10));
+        }
+
+        if (/^\d+(?::\d+)+$/.test(normalized)) {
+            return normalized
+                .split(':')
+                .reverse()
+                .reduce((total, part, index) => total + (parseInt(part, 10) * Math.pow(60, index)), 0);
+        }
+
+        const parts = Array.from(normalized.matchAll(/(\d+)\s*([hms])/g));
+        if (parts.length > 0) {
+            let totalSeconds = 0;
+
+            for (const [, amount, unit] of parts) {
+                const numericAmount = parseInt(amount, 10);
+                if (unit === 'h') totalSeconds += numericAmount * 3600;
+                if (unit === 'm') totalSeconds += numericAmount * 60;
+                if (unit === 's') totalSeconds += numericAmount;
+            }
+
+            return totalSeconds;
+        }
+
+        return 0;
     }
 
     static createThumbnailUrl(videoId, quality = 'maxresdefault') {

@@ -739,7 +739,9 @@ class MusicPlayer {
             this.pendingEndReason = null;
             this.skipRequested = false;
             this.stopRequested = false;
-            const resumeFromMs = Math.max(0, Math.floor(Number(seekMs) || 0));
+            const requestedSeekMs = Math.max(0, Math.floor(Number(seekMs) || 0));
+            const defaultTrackOffsetMs = requestedSeekMs > 0 ? 0 : this.getTrackStartOffsetMs(this.currentTrack);
+            const resumeFromMs = requestedSeekMs || defaultTrackOffsetMs;
             const resumeFromSeconds = resumeFromMs / 1000;
             this.currentTrackStartOffsetMs = resumeFromMs;
             this.lastPlaybackPosition = resumeFromMs;
@@ -833,10 +835,11 @@ class MusicPlayer {
 
             // Handle both old (string) and new (object) stream formats
             let streamUrl_final;
+            const hasStreamInfoObject = Boolean(streamInfo && typeof streamInfo === 'object');
 
             if (typeof streamInfo === 'string') {
                 streamUrl_final = streamInfo;
-            } else if (streamInfo && typeof streamInfo === 'object') {
+            } else if (hasStreamInfoObject) {
                 if (streamInfo.stream) {
                     streamUrl_final = streamInfo.stream;
                 } else {
@@ -880,6 +883,14 @@ class MusicPlayer {
                 
                 // Store track reference for background download (currentTrack might change)
                 const trackToDownload = this.currentTrack;
+                if (resumeFromMs > 0) {
+                    downloadedFile = await this.downloadTrack(trackToDownload, streamUrl_final, streamInfo);
+                    shouldDownload = false;
+
+                    if (this.currentTrack && this.currentTrack.url === trackToDownload.url) {
+                        this.currentDownloadedFile = downloadedFile;
+                    }
+                } else {
                 
                 // Download in background
                 this.downloadTrack(trackToDownload, streamUrl_final, streamInfo)
@@ -895,11 +906,16 @@ class MusicPlayer {
                         }
                     });
 
-                // Stream directly for immediate playback
-                let audioStream;
-                if (typeof streamInfo === 'object' && streamInfo.stream) {
-                    audioStream = streamInfo.stream;
-                } else if (typeof streamUrl_final === 'string') {
+                }
+
+                if (shouldDownload) {
+                    // Stream directly for immediate playback
+                    let audioStream;
+                    const hasStringStreamUrl = typeof streamUrl_final === 'string';
+                    const useDirectUrlInput = resumeFromMs > 0 && hasStringStreamUrl && !streamInfo?.stream;
+                    if (hasStreamInfoObject && streamInfo.stream) {
+                        audioStream = streamInfo.stream;
+                    } else if (hasStringStreamUrl && !useDirectUrlInput) {
                     const fetch = await ensureFetch();
                     
                     try {
@@ -930,18 +946,30 @@ class MusicPlayer {
                         
                         if (!downloadedFile) throw fetchError;
                     }
-                } else {
-                    audioStream = streamUrl_final;
-                }
+                    } else {
+                        audioStream = streamUrl_final;
+                    }
 
-                // If streaming failed and we got a downloaded file, skip to file playback
-                if (!audioStream && downloadedFile) {
-                    shouldDownload = false; // Fall through to file playback
-                } else if (audioStream) {
+                    // If streaming failed and we got a downloaded file, skip to file playback
+                    if (!audioStream && !useDirectUrlInput && downloadedFile) {
+                        shouldDownload = false; // Fall through to file playback
+                    } else if (audioStream || useDirectUrlInput) {
                     // Create FFmpeg process for streaming
-                    const seekArgs = resumeFromMs > 0 
+                    const seekArgs = resumeFromMs > 0 && !streamInfo?.seekAppliedInSource
                         ? ['-ss', (resumeFromMs / 1000).toFixed(3)] 
                         : [];
+                    const directInputArgs = useDirectUrlInput
+                        ? [
+                            '-headers',
+                            `${Object.entries(streamInfo?.httpHeaders || {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                            }).map(([key, value]) => `${key}: ${value}`).join('\r\n')}\r\n`,
+                            '-reconnect', '1',
+                            '-reconnect_streamed', '1',
+                            '-reconnect_delay_max', '5',
+                            '-i', streamUrl_final
+                        ]
+                        : ['-i', 'pipe:0'];
                     
                     const ffmpegProcess = new prism.FFmpeg({
                         command: ffmpegPath,
@@ -949,7 +977,7 @@ class MusicPlayer {
                             ...seekArgs,  // Add seek if resuming
                             '-analyzeduration', '0',
                             '-loglevel', '0',
-                            '-i', 'pipe:0',
+                            ...directInputArgs,
                             '-f', 's16le',
                             '-ar', '48000',
                             '-ac', '2'
@@ -961,7 +989,9 @@ class MusicPlayer {
                         console.error('❌ FFmpeg streaming error:', err.message);
                     });
 
-                    audioStream.pipe(ffmpegProcess);
+                    if (audioStream) {
+                        audioStream.pipe(ffmpegProcess);
+                    }
 
                     this.resource = createAudioResource(ffmpegProcess, {
                         inputType: StreamType.Raw,
@@ -973,6 +1003,7 @@ class MusicPlayer {
                             bitrate: streamInfo.bitrate || 128
                         }
                     });
+                }
                 }
             }
             
@@ -1109,7 +1140,14 @@ class MusicPlayer {
 
     getTrackCacheKey(track) {
         if (!track) return null;
-        return track.id || track.url || `${track.title}-${track.duration}`;
+        const baseKey = track.id || track.url || `${track.title}-${track.duration}`;
+        const startOffsetMs = this.getTrackStartOffsetMs(track);
+        return `${baseKey}:${startOffsetMs}`;
+    }
+
+    getTrackStartOffsetMs(track) {
+        if (!track) return 0;
+        return Math.max(0, Math.floor(Number(track.startOffsetMs) || 0));
     }
 
     getCachedStreamForCurrentTrack(seekSeconds) {
@@ -1124,6 +1162,7 @@ class MusicPlayer {
             ...this.currentTrackCache.info,
             url: seekUrl,
             canSeek: true,
+            seekAppliedInSource: seekSeconds > 0,
             fromCache: true,
             duration: this.currentTrackCache.info?.duration || this.currentTrack.duration
         };
@@ -1891,6 +1930,7 @@ class MusicPlayer {
             youtubeUrl: track.youtubeUrl || null,
             soundcloudUrl: track.soundcloudUrl || null,
             spotifyUrl: track.spotifyUrl || null,
+            startOffsetMs: this.getTrackStartOffsetMs(track),
             isLive: track.isLive || track.live || false,
             addedAt: track.addedAt || Date.now(),
             requesterId,
@@ -1915,6 +1955,7 @@ class MusicPlayer {
             youtubeUrl: data.youtubeUrl || null,
             soundcloudUrl: data.soundcloudUrl || null,
             spotifyUrl: data.spotifyUrl || null,
+            startOffsetMs: Math.max(0, Math.floor(Number(data.startOffsetMs) || 0)),
             isLive: Boolean(data.isLive),
             addedAt: data.addedAt || Date.now(),
             extra: data.extra || null
