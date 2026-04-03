@@ -8,11 +8,11 @@ class SoundCloud {
 
     static async search(query, limit = 1, guildId = null) {
         try {
-
+            const resolvedQuery = await this.resolveUrl(query);
 
             // If it's already a SoundCloud URL, get info directly
-            if (this.isSoundCloudURL(query)) {
-                const info = await this.getInfo(query, guildId);
+            if (this.isSoundCloudURL(resolvedQuery)) {
+                const info = await this.getInfo(resolvedQuery, guildId);
                 return info ? [info] : [];
             }
 
@@ -57,10 +57,10 @@ class SoundCloud {
 
     static async getInfo(url, guildId = null) {
         try {
-
+            const resolvedUrl = await this.resolveUrl(url);
 
             // Get SoundCloud info using yt-dlp
-            const info = await youtubedl(url, {
+            const info = await youtubedl(resolvedUrl, {
                 dumpSingleJson: true,
                 noCheckCertificates: true,
                 noWarnings: true,
@@ -82,10 +82,10 @@ class SoundCloud {
 
     static async getStream(url, guildId = null, startSeconds = 0) {
         try {
-
+            const resolvedUrl = await this.resolveUrl(url);
 
             // Get audio stream using yt-dlp
-            const result = await youtubedl(url, {
+            const result = await youtubedl(resolvedUrl, {
                 format: 'bestaudio/best',
                 getUrl: true,
                 noCheckCertificates: true,
@@ -108,10 +108,10 @@ class SoundCloud {
 
     static async getPlaylist(url, guildId = null) {
         try {
-
+            const resolvedUrl = await this.resolveUrl(url);
 
             // Get playlist info using yt-dlp
-            const result = await youtubedl(url, {
+            const result = await youtubedl(resolvedUrl, {
                 dumpSingleJson: true,
                 flatPlaylist: true,
                 noCheckCertificates: true,
@@ -137,7 +137,7 @@ class SoundCloud {
                 title: result.title || result.playlist_title || unknownPlaylist,
                 tracks: tracks,
                 totalTracks: result.playlist_count || tracks.length,
-                url: url,
+                url: resolvedUrl,
                 platform: 'soundcloud',
                 type: 'playlist',
                 description: result.description,
@@ -190,7 +190,7 @@ class SoundCloud {
             const track = {
                 title: soundcloudTrack.title || soundcloudTrack.fulltitle || unknownTitle,
                 artist: soundcloudTrack.uploader || soundcloudTrack.artist || unknownArtist,
-                url: soundcloudTrack.webpage_url || soundcloudTrack.url,
+                url: await this.resolveUrl(soundcloudTrack.webpage_url || soundcloudTrack.url),
                 duration: soundcloudTrack.duration || 0,
                 thumbnail: soundcloudTrack.thumbnail,
                 platform: 'soundcloud',
@@ -215,6 +215,8 @@ class SoundCloud {
             /^https?:\/\/(www\.)?soundcloud\.com\/[\w-]+\/[\w-]+/,
             /^https?:\/\/(www\.)?soundcloud\.com\/[\w-]+\/sets\/[\w-]+/,
             /^https?:\/\/(www\.)?soundcloud\.com\/[\w-]+$/,
+            /^https?:\/\/on\.soundcloud\.com\/[\w-]+/i,
+            /^https?:\/\/soundcloud\.app\.goo\.gl\/[\w-]+/i,
         ];
         return patterns.some(pattern => pattern.test(url));
     }
@@ -250,12 +252,13 @@ class SoundCloud {
 
     static async validateUrl(url) {
         try {
-            if (!this.isSoundCloudURL(url)) {
+            const resolvedUrl = await this.resolveUrl(url);
+            if (!this.isSoundCloudURL(resolvedUrl)) {
                 return false;
             }
 
             // URL validation with yt-dlp
-            const info = await youtubedl(url, {
+            const info = await youtubedl(resolvedUrl, {
                 dumpSingleJson: true,
                 noCheckCertificates: true,
                 noWarnings: true,
@@ -291,6 +294,29 @@ class SoundCloud {
 
     static createUserUrl(username) {
         return `https://soundcloud.com/${username}`;
+    }
+
+    static async resolveUrl(url) {
+        if (!url || typeof url !== 'string') return url;
+        if (!this.isSoundCloudURL(url)) return url;
+
+        try {
+            const response = await axios.get(url, {
+                maxRedirects: 5,
+                timeout: 10000,
+                responseType: 'stream',
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            });
+
+            response.data?.destroy?.();
+
+            const finalUrl = response?.request?.res?.responseUrl || response?.request?._redirectable?._currentUrl;
+            return finalUrl || url;
+        } catch (error) {
+            return url;
+        }
     }
 
     static async getRelatedTracks(trackUrl, limit = 5) {

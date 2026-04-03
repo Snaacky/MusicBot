@@ -1785,7 +1785,7 @@ class MusicPlayer {
             return 'youtube';
         } else if (query.includes('spotify.com')) {
             return 'spotify';
-        } else if (query.includes('soundcloud.com')) {
+        } else if (query.includes('soundcloud.com') || query.includes('on.soundcloud.com') || query.includes('soundcloud.app.goo.gl')) {
             return 'soundcloud';
         } else if (query.match(/^https?:\/\/.*\.(mp3|wav|ogg|flac|m4a|aac|wma|opus|webm|mp4)$/i)) {
             return 'direct';

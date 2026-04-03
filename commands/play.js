@@ -231,7 +231,7 @@ module.exports = {
             return 'youtube';
         } else if (query.includes('spotify.com')) {
             return 'spotify';
-        } else if (query.includes('soundcloud.com')) {
+        } else if (query.includes('soundcloud.com') || query.includes('on.soundcloud.com') || query.includes('soundcloud.app.goo.gl')) {
             return 'soundcloud';
         } else if (query.startsWith('http') && (query.includes('.mp3') || query.includes('.wav') || query.includes('.ogg'))) {
             return 'direct';
