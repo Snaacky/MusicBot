@@ -202,14 +202,6 @@ module.exports = {
     },
 
     async handleSkip(interaction, player, requesterId) {
-        // Authorization check
-        if (!this.isAuthorized(interaction, requesterId)) {
-            return await interaction.reply({
-                content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.not_authorized'),
-                flags: [1 << 6]
-            });
-        }
-
         if (!player.currentTrack) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.no_song_playing'),
