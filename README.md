@@ -119,7 +119,7 @@ npm run start
 node index.js
 ```
 
-Slash commands register automatically when the bot starts. Guild-scoped deployment executes within seconds if `GUILD_ID` is provided; global rollout can take up to an hour per Discord caching rules.
+Slash commands register automatically when the bot starts. Guild-scoped deployment executes within seconds if `GUILD_ID` is provided; you can pass multiple guild IDs as a comma-separated list for fast sync to several test servers. Global rollout can take up to an hour per Discord caching rules.
 
 ---
 
@@ -132,7 +132,9 @@ Beatra reads from both `config.js` defaults and environment variables via `.env`
 ```dotenv
 DISCORD_TOKEN=your_bot_token
 CLIENT_ID=your_application_id
-GUILD_ID=optional_guild_for_fast_testing
+GUILD_ID=optional_guild_id_for_fast_testing
+# Or multiple guilds:
+# GUILD_ID=123456789012345678,987654321098765432
 SPOTIFY_CLIENT_ID=spotify_client_id
 SPOTIFY_CLIENT_SECRET=spotify_client_secret
 GENIUS_CLIENT_ID=optional_genius_client_id
@@ -151,7 +153,7 @@ COOKIES_FILE=./cookies.txt
 | --- | --- | --- |
 | `discord.token` | `.env` → `config.discord.token` | Discord bot token used for login and REST registration. |
 | `discord.clientId` | `.env` → `config.discord.clientId` | Application ID required to register slash commands. |
-| `discord.guildId` | `.env` → `config.discord.guildId` | Optional testing guild ID for <1 minute command deployment. Leave blank for global registration. |
+| `discord.guildId` / `discord.guildIds` | `.env` → `config.discord` | Optional testing guild ID, or comma-separated guild IDs, for fast command deployment. Leave blank for global registration. |
 | `bot.status` | `.env`/`config.js` | Activity text shown as "Listening to ...". |
 | `bot.embedColor` | `.env`/`config.js` | Hex color for all embeds. |
 | `bot.supportServer` & `bot.website` | `.env`/`config.js` | Populates help links and README badges. |
@@ -603,7 +605,7 @@ Add your own by copying `languages/en.json`, translating strings, and restarting
 
 ## Deployment Tips
 
-- **Testing Guild** – Set `GUILD_ID` during development to avoid the global propagation delay. Remove it before production to reach every server automatically.
+- **Testing Guild** – Set `GUILD_ID` during development to avoid the global propagation delay. You can provide one guild ID or a comma-separated list. Remove it before production to reach every server automatically.
 - **Process Manager** – Use `pm2`, `systemd`, or Docker to keep the bot alive and restart on crashes. Remember to persist the `database/languages.json` file if you containerize.
 - **Logging** – Leverage the built-in Chalk-colored console output. Redirect stdout/stderr to log files for long-term monitoring.
 - **Scaling** – The bot maintains one voice connection per guild. Horizontal scaling requires a shared state & queue (Redis, REST API, etc.) — future roadmap material.

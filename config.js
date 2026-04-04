@@ -1,12 +1,18 @@
 // Load environment variables
 require('dotenv').config();
 
+const guildIds = (process.env.GUILD_ID || '')
+    .split(',')
+    .map(guildId => guildId.trim())
+    .filter(Boolean);
+
 module.exports = {
     // Discord Bot Settings
     discord: {
         token: process.env.DISCORD_TOKEN || 'YOUR_DISCORD_BOT_TOKEN_HERE',
         clientId: process.env.CLIENT_ID || 'YOUR_CLIENT_ID_HERE',
-        guildId: process.env.GUILD_ID || null, // Leave null for global commands
+        guildId: guildIds[0] || null, // First target guild for backward compatibility
+        guildIds, // Leave empty for global commands
     },
 
     // Spotify API Settings

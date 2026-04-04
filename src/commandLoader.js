@@ -28,18 +28,22 @@ const rest = new REST().setToken(config.discord.token);
     try {
         console.log(`\n🚀 Started refreshing ${commands.length} application (/) commands.`);
 
-        let data;
+        let deployedCommands = [];
 
-        if (config.discord.guildId) {
-            // Deploy to specific guild (faster for testing)
-            data = await rest.put(
-                Routes.applicationGuildCommands(config.discord.clientId, config.discord.guildId),
-                { body: commands }
-            );
-            console.log(`✅ Successfully reloaded ${data.length} guild application (/) commands for guild ${config.discord.guildId}.`);
+        if (config.discord.guildIds.length > 0) {
+            // Deploy to specific guilds (faster for testing)
+            for (const guildId of config.discord.guildIds) {
+                const data = await rest.put(
+                    Routes.applicationGuildCommands(config.discord.clientId, guildId),
+                    { body: commands }
+                );
+
+                console.log(`✅ Successfully reloaded ${data.length} guild application (/) commands for guild ${config.discord.guildId}.`);
+                deployedCommands = data;
+            }
         } else {
             // Deploy globally (takes up to 1 hour to propagate)
-            data = await rest.put(
+            deployedCommands = await rest.put(
                 Routes.applicationCommands(config.discord.clientId),
                 { body: commands }
             );
@@ -47,10 +51,9 @@ const rest = new REST().setToken(config.discord.token);
         }
 
         console.log('\n📝 Deployed commands:');
-        data.forEach(command => {
+        deployedCommands.forEach(command => {
             console.log(`   • /${command.name} - ${command.description}`);
         });
-
     } catch (error) {
         if (error.code === 50001) {
             console.error('❌ Command deployment failed: Bot has no access to the target guild.');
@@ -60,7 +63,8 @@ const rest = new REST().setToken(config.discord.token);
         } else {
             console.error('❌ Error deploying commands:', error);
         }
-        // Don't call process.exit() here — let the bot client continue starting up
+
+        // Do not call process.exit() here - let the bot client continue starting up
     }
 })();
 

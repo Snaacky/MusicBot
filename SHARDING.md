@@ -252,6 +252,8 @@ SHARD_SPAWN_TIMEOUT=60000   # Increase ready timeout to 60 seconds
 1. Use guild-specific testing:
    ```dotenv
    GUILD_ID=your_test_server_id
+   # Or multiple:
+   # GUILD_ID=your_test_server_id,your_second_test_server_id
    ```
 2. Wait 60 minutes for global commands
 3. Check all shards are ready in console logs
