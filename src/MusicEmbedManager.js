@@ -78,14 +78,20 @@ class MusicEmbedManager {
                             await player.connect();
                         }
                         await player.play();
-
-                        // Yeni embed oluştur
-                        firstTrackResult = await this.createNewMusicEmbed(player, track, member, interaction);
                     } catch (playError) {
                         console.error('Error in play process:', playError);
                         // Hata durumunda track'i sıraya ekle
                         player.currentTrack = null;
                         player.queue.push(track);
+                        continue;
+                    }
+
+                    // Yeni embed oluştur. Mesaj hataları playback'i başarısız saymamalı.
+                    try {
+                        firstTrackResult = await this.createNewMusicEmbed(player, track, member, interaction);
+                    } catch (embedError) {
+                        console.error('Error creating now playing embed:', embedError);
+                        firstTrackResult = { success: true, message: 'Now playing', isNewEmbed: false };
                     }
                 } else {
                     // Kuyruğa ekle
@@ -165,8 +171,61 @@ class MusicEmbedManager {
                 components: disabledButtons
             });
         } catch (error) {
+            if (this.isStaleInteractionError(error)) {
+                player.nowPlayingMessage = null;
+                return;
+            }
+
             console.error('Error disabling previous now playing message:', error);
         }
+    }
+
+    isStaleInteractionError(error) {
+        return error?.code === 10008 || // Unknown Message
+            error?.code === 10062 || // Unknown interaction
+            error?.code === 40060; // Interaction already acknowledged
+    }
+
+    channelSafePayload(payload) {
+        const { flags, ephemeral, ...channelPayload } = payload;
+        return channelPayload;
+    }
+
+    async sendInteractionOrChannel(interaction, channel, payload) {
+        try {
+            if (interaction) {
+                if (interaction.deferred || interaction.replied) {
+                    return await interaction.editReply(payload);
+                }
+
+                await interaction.reply(payload);
+                return await interaction.fetchReply();
+            }
+        } catch (error) {
+            if (!this.isStaleInteractionError(error)) {
+                throw error;
+            }
+
+            console.warn(`Interaction response was no longer available (${error.code}); sending to channel instead.`);
+        }
+
+        if (!channel || typeof channel.send !== 'function') {
+            throw new Error('Unable to send music message: no available text channel');
+        }
+
+        return await channel.send(this.channelSafePayload(payload));
+    }
+
+    safelyDeleteLater(message, delayMs = 10000) {
+        if (!message || typeof message.delete !== 'function') return;
+
+        setTimeout(async () => {
+            try {
+                await message.delete();
+            } catch (error) {
+                // Message may have already been deleted or become inaccessible.
+            }
+        }, delayMs);
     }
 
     async createNewMusicEmbed(player, track, member, interaction) {
@@ -181,11 +240,11 @@ class MusicEmbedManager {
 
         let message;
         if (interaction) {
-            if (interaction.deferred || interaction.replied) {
-                message = await interaction.editReply({ content: null, embeds: [embed], components: buttons });
-            } else {
-                message = await interaction.reply({ embeds: [embed], components: buttons });
-            }
+            message = await this.sendInteractionOrChannel(interaction, player.textChannel, {
+                content: null,
+                embeds: [embed],
+                components: buttons
+            });
         } else {
             message = await player.textChannel.send({ embeds: [embed], components: buttons });
         }
@@ -209,25 +268,17 @@ class MusicEmbedManager {
 
         let infoMessage;
         if (interaction) {
-            if (interaction.deferred || interaction.replied) {
-                infoMessage = await interaction.editReply({ content: messageText, embeds: [], components: [] });
-            } else {
-                infoMessage = await interaction.reply({ content: messageText, flags: [1 << 6] });
-            }
+            infoMessage = await this.sendInteractionOrChannel(interaction, player.textChannel, {
+                content: messageText,
+                embeds: [],
+                components: []
+            });
         } else {
             infoMessage = await player.textChannel.send({ content: messageText });
-            return { success: true, message: 'Added to queue', isNewEmbed: false };
         }
-        return { success: true, message: 'Added to queue', isNewEmbed: false };
 
         // Bilgi mesajını 10 saniye sonra sil
-        setTimeout(async () => {
-            try {
-                await infoMessage.delete();
-            } catch (error) {
-                // Mesaj silinmiş olabilir
-            }
-        }, 10000);
+        this.safelyDeleteLater(infoMessage);
 
         return { success: true, message: 'Added to queue', isNewEmbed: false };
     }
@@ -335,6 +386,11 @@ class MusicEmbedManager {
                 components: buttons
             });
         } catch (error) {
+            if (this.isStaleInteractionError(error)) {
+                player.nowPlayingMessage = null;
+                return;
+            }
+
             console.error('Error updating now playing embed:', error);
         }
     }

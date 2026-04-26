@@ -8,6 +8,42 @@ const PlayerStateManager = require('./src/PlayerStateManager');
 const MusicPlayer = require('./src/MusicPlayer');
 const chalk = require('chalk');
 
+function isIgnorableDiscordError(error) {
+    return error?.code === 10008 || // Unknown Message
+        error?.code === 10062 || // Unknown interaction
+        error?.code === 40060; // Interaction already acknowledged
+}
+
+function isTransientNetworkError(error) {
+    const message = String(error?.message || '').toLowerCase();
+    const code = error?.code || error?.cause?.code;
+
+    return code === 'EAI_AGAIN' ||
+        code === 'ENOTFOUND' ||
+        code === 'UND_ERR_SOCKET' ||
+        code === 'ECONNRESET' ||
+        code === 'ETIMEDOUT' ||
+        message.includes('terminated') ||
+        message.includes('getaddrinfo') ||
+        message.includes('eai_again') ||
+        message.includes('enotfound') ||
+        message.includes('econnreset') ||
+        message.includes('etimedout') ||
+        message.includes('socket hang up') ||
+        message.includes('fetch failed');
+}
+
+function configureShardListenerLimits(client) {
+    const shards = client?.ws?.shards;
+    if (!shards || typeof shards.forEach !== 'function') return;
+
+    shards.forEach(shard => {
+        if (typeof shard.setMaxListeners === 'function') {
+            shard.setMaxListeners(Math.max(shard.getMaxListeners?.() || 10, 100));
+        }
+    });
+}
+
 if (!config.ytdl.poToken && (config.ytdl.cookiesFromBrowser || config.ytdl.cookiesFile)) console.log('✅ Loaded cookies will be passed to yt-dlp');
 
 require("./src/commandLoader"); // Load and deploy commands
@@ -142,6 +178,7 @@ setTimeout(() => {
     // Collections for commands and music players
     client.commands = new Collection();
     client.players = new Collection();
+    configureShardListenerLimits(client);
 
     // Initialize Music Embed Manager
     const MusicEmbedManager = require('./src/MusicEmbedManager');
@@ -209,6 +246,8 @@ setTimeout(() => {
 
     // Basic ready event
     client.once(Events.ClientReady, async () => {
+        configureShardListenerLimits(client);
+
         console.log(chalk.green(`✅ [SHARD ${client.shard?.ids[0] ?? 0}] ${client.user.tag} is online and ready!`));
         console.log(chalk.cyan(`🎵 [SHARD ${client.shard?.ids[0] ?? 0}] Music bot serving ${client.guilds.cache.size} servers on this shard!`));
 
@@ -387,15 +426,19 @@ setTimeout(() => {
     process.on('unhandledRejection', (reason, promise) => {
         console.error(chalk.red('❌ Unhandled Rejection at:'), promise, chalk.red('reason:'), reason);
 
+        if (isIgnorableDiscordError(reason)) {
+            console.log(chalk.yellow('ℹ️ Discord interaction/message error handled, continuing...'));
+            return;
+        }
+
+        if (isTransientNetworkError(reason)) {
+            console.log(chalk.yellow('⚠️ Transient network error occurred, but bot continues running...'));
+            return;
+        }
+
         // Discord API error handling
         if (reason && reason.code) {
             switch (reason.code) {
-                case 10062: // Unknown interaction
-                    console.log(chalk.yellow('ℹ️ Interaction has expired, safely ignoring...'));
-                    return;
-                case 40060: // Interaction already acknowledged
-                    console.log(chalk.yellow('ℹ️ Interaction already acknowledged, safely ignoring...'));
-                    return;
                 case 50013: // Missing permissions
                     console.error(chalk.red('❌ Missing permissions for Discord action'));
                     return;
@@ -419,15 +462,13 @@ setTimeout(() => {
         console.error(chalk.red('❌ Uncaught Exception:'), error);
 
         // Don't exit on Discord API errors
-        if (error.code === 10062 || error.code === 40060) {
-            console.log(chalk.yellow('ℹ️ Discord interaction error handled, continuing...'));
+        if (isIgnorableDiscordError(error)) {
+            console.log(chalk.yellow('ℹ️ Discord interaction/message error handled, continuing...'));
             return;
         }
 
         // Handle fetch/network termination errors - don't crash
-        if (error.message && (error.message.includes('terminated') ||
-            error.message.includes('ECONNRESET') ||
-            error.message.includes('ETIMEDOUT'))) {
+        if (isTransientNetworkError(error)) {
             console.log(chalk.yellow('⚠️ Network error occurred, but bot continues running...'));
             return;
         }

@@ -87,7 +87,9 @@ class ErrorHandler {
             msg.includes('socket hang up') ||
             msg.includes('network') ||
             msg.includes('connection refused') ||
-            msg.includes('getaddrinfo')
+            msg.includes('getaddrinfo') ||
+            msg.includes('eai_again') ||
+            msg.includes('enotfound')
         ) return 'network_error';
 
         // FFmpeg / stream processing

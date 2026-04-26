@@ -2,6 +2,31 @@ const { ShardingManager } = require('discord.js');
 const config = require('./config');
 const chalk = require('chalk');
 
+function isIgnorableDiscordError(error) {
+    return error?.code === 10008 || // Unknown Message
+        error?.code === 10062 || // Unknown interaction
+        error?.code === 40060; // Interaction already acknowledged
+}
+
+function isTransientNetworkError(error) {
+    const message = String(error?.message || '').toLowerCase();
+    const code = error?.code || error?.cause?.code;
+
+    return code === 'EAI_AGAIN' ||
+        code === 'ENOTFOUND' ||
+        code === 'UND_ERR_SOCKET' ||
+        code === 'ECONNRESET' ||
+        code === 'ETIMEDOUT' ||
+        message.includes('terminated') ||
+        message.includes('getaddrinfo') ||
+        message.includes('eai_again') ||
+        message.includes('enotfound') ||
+        message.includes('econnreset') ||
+        message.includes('etimedout') ||
+        message.includes('socket hang up') ||
+        message.includes('fetch failed');
+}
+
 // Create sharding manager
 const manager = new ShardingManager('./index.js', {
     token: config.discord.token,
@@ -45,10 +70,18 @@ manager.on('shardCreate', shard => {
 // Error handling
 process.on('unhandledRejection', (reason, promise) => {
     console.error(chalk.red('❌ Unhandled Rejection in Shard Manager:'), reason);
+
+    if (isIgnorableDiscordError(reason) || isTransientNetworkError(reason)) {
+        console.log(chalk.yellow('⚠️ Non-fatal shard manager error ignored.'));
+    }
 });
 
 process.on('uncaughtException', (error) => {
     console.error(chalk.red('❌ Uncaught Exception in Shard Manager:'), error);
+
+    if (isIgnorableDiscordError(error) || isTransientNetworkError(error)) {
+        console.log(chalk.yellow('⚠️ Non-fatal shard manager error ignored.'));
+    }
 });
 
 // Graceful shutdown

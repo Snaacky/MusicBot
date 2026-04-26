@@ -3,6 +3,7 @@ const {
     createAudioPlayer,
     createAudioResource,
     VoiceConnectionStatus,
+    getVoiceConnection,
     joinVoiceChannel,
     entersState,
     StreamType
@@ -57,6 +58,7 @@ class MusicPlayer {
         // Audio player setup
         this.audioPlayer = createAudioPlayer();
         this.connection = null;
+        this.connectionEventTarget = null;
         this.resource = null;
 
         // Queue management
@@ -94,6 +96,7 @@ class MusicPlayer {
         this.maxRecoveryAttempts = 5;
         this.recoveryAttempts = 0;
         this.recoveryInterval = null;
+        this.recoveryAttemptInProgress = false;
         this.connectionHealthCheck = null;
 
         // Playback lifecycle state
@@ -131,6 +134,23 @@ class MusicPlayer {
 
         // Events setup
         this.setupEvents();
+    }
+
+    isTransientVoiceNetworkError(error) {
+        const message = String(error?.message || '').toLowerCase();
+        const code = error?.code || error?.cause?.code;
+
+        return code === 'EAI_AGAIN' ||
+            code === 'ENOTFOUND' ||
+            code === 'ECONNRESET' ||
+            code === 'ETIMEDOUT' ||
+            code === 'UND_ERR_SOCKET' ||
+            message.includes('getaddrinfo') ||
+            message.includes('eai_again') ||
+            message.includes('enotfound') ||
+            message.includes('econnreset') ||
+            message.includes('etimedout') ||
+            message.includes('socket hang up');
     }
 
     setupEvents() {
@@ -179,6 +199,16 @@ class MusicPlayer {
 
     setupConnectionEvents() {
         if (!this.connection) return;
+        if (this.connectionEventTarget === this.connection) return;
+
+        if (this.connectionEventTarget) {
+            this.connectionEventTarget.removeAllListeners(VoiceConnectionStatus.Disconnected);
+            this.connectionEventTarget.removeAllListeners(VoiceConnectionStatus.Destroyed);
+            this.connectionEventTarget.removeAllListeners('error');
+            this.connectionEventTarget.removeAllListeners('stateChange');
+        }
+
+        this.connectionEventTarget = this.connection;
 
         this.connection.on(VoiceConnectionStatus.Disconnected, async (oldState, newState) => {
 
@@ -209,7 +239,12 @@ class MusicPlayer {
         });
 
         this.connection.on('error', (error) => {
-            console.error('🚨 Voice connection error:', error);
+            if (this.isTransientVoiceNetworkError(error)) {
+                console.warn(`⚠️ Transient voice connection error (${error.code || error.message}); attempting recovery...`);
+            } else {
+                console.error('🚨 Voice connection error:', error);
+            }
+
             if (this.currentTrack && !this.paused) {
                 this.startConnectionRecovery();
             }
@@ -261,12 +296,15 @@ class MusicPlayer {
 
         // Start recovery attempts
         this.recoveryInterval = setInterval(async () => {
+            if (this.recoveryAttemptInProgress) return;
+
             this.recoveryAttempts++;
             if (this.recoveryAttempts > this.maxRecoveryAttempts) {
                 this.stopConnectionRecovery();
                 return;
             }
 
+            this.recoveryAttemptInProgress = true;
             try {
                 // Check if voice channel still exists and bot is still in it
                 const channel = this.guild.channels.cache.get(this.voiceChannel.id);
@@ -285,8 +323,10 @@ class MusicPlayer {
                 }
             } catch (error) {
                 console.error(`❌ Recovery attempt ${this.recoveryAttempts} failed:`, error);
+            } finally {
+                this.recoveryAttemptInProgress = false;
             }
-        }, 3000); // Try every 3 seconds
+        }, 5000); // Try every 5 seconds
     }
 
     stopConnectionRecovery() {
@@ -296,6 +336,7 @@ class MusicPlayer {
         }
         this.isRecovering = false;
         this.recoveryAttempts = 0;
+        this.recoveryAttemptInProgress = false;
     }
 
     savePlaybackPosition() {
@@ -310,7 +351,10 @@ class MusicPlayer {
         try {
             // Destroy old connection
             if (this.connection) {
+                this.connection.removeAllListeners();
                 this.connection.destroy();
+                this.connection = null;
+                this.connectionEventTarget = null;
             }
 
             // Create new connection
@@ -353,6 +397,23 @@ class MusicPlayer {
 
     async connect() {
         try {
+            const existingConnection = this.connection || getVoiceConnection(this.guild.id);
+            if (existingConnection && existingConnection.state.status !== VoiceConnectionStatus.Destroyed) {
+                this.connection = existingConnection;
+                this.setupConnectionEvents();
+                this.connection.subscribe(this.audioPlayer);
+
+                try {
+                    await entersState(this.connection, VoiceConnectionStatus.Ready, 5000);
+                    return true;
+                } catch (error) {
+                    this.connection.removeAllListeners();
+                    this.connection.destroy();
+                    this.connection = null;
+                    this.connectionEventTarget = null;
+                }
+            }
+
             // Wait for guild's WebSocket to be ready (critical for sharding)
             if (!this.guild.voiceAdapterCreator) {
                 // Wait up to 10 seconds for the adapter to become available
@@ -396,7 +457,11 @@ class MusicPlayer {
             await entersState(this.connection, VoiceConnectionStatus.Ready, 30000);
             return true;
         } catch (error) {
-            console.error('❌ Failed to connect to voice channel:', error.message);
+            if (this.isTransientVoiceNetworkError(error)) {
+                console.warn(`⚠️ Temporary voice DNS/network failure while connecting: ${error.message}`);
+            } else {
+                console.error('❌ Failed to connect to voice channel:', error.message);
+            }
             throw error; // Re-throw so restoreFromState can handle it
         }
     }
@@ -424,6 +489,7 @@ class MusicPlayer {
                     console.error('❌ Error destroying old connection:', destroyError);
                 }
                 this.connection = null;
+                this.connectionEventTarget = null;
             }
         }
 
@@ -433,11 +499,13 @@ class MusicPlayer {
     disconnect() {
         if (this.connection && this.connection.state && this.connection.state.status !== 'destroyed') {
             try {
+                this.connection.removeAllListeners();
                 this.connection.destroy();
             } catch (error) {
             }
         }
         this.connection = null;
+        this.connectionEventTarget = null;
     }
 
     async addTrack(query, requestedBy, platform = 'auto') {
@@ -2321,6 +2389,7 @@ class MusicPlayer {
             // Clear recovery data
             this.isRecovering = false;
             this.recoveryAttempts = 0;
+            this.recoveryAttemptInProgress = false;
             this.lastPlaybackPosition = 0;
             this.currentTrackStartOffsetMs = 0;
 
@@ -2376,7 +2445,10 @@ class MusicPlayer {
         }
 
         if (this.connection) {
+            this.connection.removeAllListeners();
             this.connection.destroy();
+            this.connection = null;
+            this.connectionEventTarget = null;
         }
     }
 }
