@@ -125,7 +125,7 @@ module.exports = {
     },
 
     normalizeQuery(query, allowPlaylist = false) {
-        if (allowPlaylist || !query || typeof query !== 'string') {
+        if (!query || typeof query !== 'string') {
             return query;
         }
 
@@ -137,12 +137,27 @@ module.exports = {
             const url = new URL(query);
             url.searchParams.delete('pp');
 
+            if (!allowPlaylist) {
+                url.searchParams.delete('list');
+                url.searchParams.delete('start_radio');
+                url.searchParams.delete('index');
+            }
+
             const normalizedQuery = url.toString();
             return normalizedQuery.endsWith('?')
                 ? normalizedQuery.slice(0, -1)
                 : normalizedQuery;
         } catch (error) {
-            return query.replace(/([?&])pp=[^&#]+&?/i, (match, prefix) => prefix === '?' ? '?' : '')
+            let normalizedQuery = query.replace(/([?&])pp=[^&#]+&?/i, (match, prefix) => prefix === '?' ? '?' : '');
+
+            if (!allowPlaylist) {
+                normalizedQuery = normalizedQuery
+                    .replace(/([?&])list=[^&#]+&?/i, (match, prefix) => prefix === '?' ? '?' : '')
+                    .replace(/([?&])start_radio=[^&#]+&?/i, (match, prefix) => prefix === '?' ? '?' : '')
+                    .replace(/([?&])index=[^&#]+&?/i, (match, prefix) => prefix === '?' ? '?' : '');
+            }
+
+            return normalizedQuery
                 .replace(/\?&/, '?')
                 .replace(/&&+/g, '&')
                 .replace(/[?&]$/, '');
