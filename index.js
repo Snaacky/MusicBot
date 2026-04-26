@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, Collection, Events, ActivityType } = require('discord.js');
+const { Client, GatewayIntentBits, Collection, Events, ActivityType, MessageFlags } = require('discord.js');
 const { getVoiceConnection } = require('@discordjs/voice');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
@@ -308,9 +308,9 @@ setTimeout(() => {
             const errorMessage = '❌ An error occurred while executing this command!';
 
             if (interaction.replied || interaction.deferred) {
-                await interaction.followUp({ content: errorMessage, ephemeral: true });
+                await interaction.followUp({ content: errorMessage, flags: MessageFlags.Ephemeral });
             } else {
-                await interaction.reply({ content: errorMessage, ephemeral: true });
+                await interaction.reply({ content: errorMessage, flags: MessageFlags.Ephemeral });
             }
         }
     });

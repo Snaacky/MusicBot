@@ -1,4 +1,4 @@
-const { Events, EmbedBuilder, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { Events, EmbedBuilder, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 const config = require('../config');
 const LanguageManager = require('../src/LanguageManager');
 const MusicPlayer = require('../src/MusicPlayer');
@@ -32,7 +32,7 @@ module.exports = {
         if (!member.voice.channel) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(guild?.id, 'buttonhandler.voice_channel_required'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -41,7 +41,7 @@ module.exports = {
         if (!player) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(guild?.id, 'buttonhandler.no_music_playing'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -49,7 +49,7 @@ module.exports = {
         if (player.voiceChannel.id !== member.voice.channel.id) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(guild?.id, 'buttonhandler.same_channel_required'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -62,7 +62,7 @@ module.exports = {
             if (sessionId && player.sessionId && sessionId !== player.sessionId) {
                 return await interaction.reply({
                     content: await LanguageManager.getTranslation(guild?.id, 'buttonhandler.session_invalid'),
-                    flags: [1 << 6]
+                    flags: MessageFlags.Ephemeral
                 });
             }
 
@@ -106,7 +106,7 @@ module.exports = {
                 default:
                     await interaction.reply({
                         content: await LanguageManager.getTranslation(guild?.id, 'buttonhandler.unknown_interaction'),
-                        flags: [1 << 6]
+                        flags: MessageFlags.Ephemeral
                     });
             }
         } catch (error) {
@@ -115,7 +115,7 @@ module.exports = {
                 try {
                     await interaction.reply({
                         content: await LanguageManager.getTranslation(guild?.id, 'buttonhandler.processing_error'),
-                        flags: [1 << 6]
+                        flags: MessageFlags.Ephemeral
                     });
                 } catch (replyError) {
                 }
@@ -145,14 +145,14 @@ module.exports = {
         if (!this.isAuthorized(interaction, requesterId)) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.not_authorized'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
         if (!player.currentTrack) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.no_song_playing'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -187,7 +187,7 @@ module.exports = {
                 embed.setThumbnail(player.currentTrack.thumbnail);
             }
 
-            await interaction.reply({ embeds: [embed], flags: [1 << 6] });
+            await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 
             // Ana embed'deki butonları güncelle (pause/resume değişimi)
             if (interaction.client.musicEmbedManager) {
@@ -196,7 +196,7 @@ module.exports = {
         } else {
             await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.operation_failed'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
     },
@@ -205,7 +205,7 @@ module.exports = {
         if (!player.currentTrack) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.no_song_playing'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -213,7 +213,7 @@ module.exports = {
         if (player.queue.length === 0) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.no_songs_to_skip'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -251,7 +251,7 @@ module.exports = {
                 embed.setThumbnail(currentTrack.thumbnail);
             }
 
-            await interaction.reply({ embeds: [embed], flags: [1 << 6] });
+            await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 
             // Embed Manager ile ana embed'i güncelle
             if (interaction.client.musicEmbedManager && player.currentTrack) {
@@ -260,7 +260,7 @@ module.exports = {
         } else {
             await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.song_not_skipped'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
     },
@@ -269,7 +269,7 @@ module.exports = {
         if (player.previousTracks.length === 0) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.no_previous_song'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -278,12 +278,12 @@ module.exports = {
         if (result) {
             await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.moved_to_previous'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         } else {
             await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.previous_failed'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
     },
@@ -293,7 +293,7 @@ module.exports = {
         if (!this.isAuthorized(interaction, requesterId)) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.not_authorized'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -320,7 +320,7 @@ module.exports = {
             });
         }
 
-        await interaction.reply({ embeds: [embed], flags: [1 << 6] });
+        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 
         // Ana embed'deki butonları disable yap
         if (client.musicEmbedManager) {
@@ -334,7 +334,7 @@ module.exports = {
         if (!queueInfo.current && queueInfo.queue.length === 0) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.no_songs_in_queue'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -380,7 +380,7 @@ module.exports = {
             text: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.total_songs', { count: queueInfo.queue.length + (queueInfo.current ? 1 : 0) })
         });
 
-        await interaction.reply({ embeds: [embed], flags: [1 << 6] });
+        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
     },
 
     async handleShuffle(interaction, player, requesterId) {
@@ -388,14 +388,14 @@ module.exports = {
         if (!this.isAuthorized(interaction, requesterId)) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.not_authorized'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
         if (player.queue.length < 2) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.minimum_songs_shuffle'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -433,7 +433,7 @@ module.exports = {
             });
         }
 
-        await interaction.reply({ embeds: [embed], flags: [1 << 6] });
+        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 
         // Ana embed'i güncelle
         if (interaction.client.musicEmbedManager) {
@@ -446,7 +446,7 @@ module.exports = {
         if (!this.isAuthorized(interaction, requesterId)) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.not_authorized'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -477,14 +477,14 @@ module.exports = {
         if (!this.isAuthorized(interaction, requesterId)) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.not_authorized'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
         if (!player.currentTrack) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.no_song_playing'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -528,7 +528,7 @@ module.exports = {
             embed.setThumbnail(player.currentTrack.thumbnail);
         }
 
-        await interaction.reply({ embeds: [embed], flags: [1 << 6] });
+        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 
         // Update the main embed to reflect the new loop mode
         if (interaction.client.musicEmbedManager) {
@@ -543,7 +543,7 @@ module.exports = {
         if (!this.isAuthorized(interaction, requesterId)) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.not_authorized'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -557,7 +557,7 @@ module.exports = {
                 .setColor(config.bot.embedColor)
                 .setTimestamp();
 
-            await interaction.reply({ embeds: [embed], flags: [1 << 6] });
+            await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
             
             // Update the main embed
             if (interaction.client.musicEmbedManager) {
@@ -643,7 +643,7 @@ module.exports = {
         await interaction.reply({
             embeds: [embed],
             components: [row],
-            flags: [1 << 6]
+            flags: MessageFlags.Ephemeral
         });
     },
 
@@ -842,12 +842,12 @@ module.exports = {
                 if (!interaction.replied && !interaction.deferred) {
                     await interaction.reply({
                         content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.refresh_error'),
-                        flags: [1 << 6]
+                        flags: MessageFlags.Ephemeral
                     });
                 } else {
                     await interaction.followUp({
                         content: await LanguageManager.getTranslation(interaction.guild?.id, 'buttonhandler.refresh_error'),
-                        flags: [1 << 6]
+                        flags: MessageFlags.Ephemeral
                     });
                 }
             } catch (err) {
@@ -864,7 +864,7 @@ module.exports = {
         if (!member.voice.channel) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(guild?.id, 'buttonhandler.voice_channel_required'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -872,7 +872,7 @@ module.exports = {
         if (!global.searchResults || !global.searchResults.has(interaction.user.id)) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(guild?.id, 'buttonhandler.search_expired'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -900,7 +900,7 @@ module.exports = {
         if (!selectedTrack) {
             return await interaction.reply({
                 content: await LanguageManager.getTranslation(guild?.id, 'buttonhandler.invalid_selection'),
-                flags: [1 << 6]
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -988,7 +988,7 @@ module.exports = {
             if (!player.currentTrack) {
                 return await interaction.reply({
                     content: await LanguageManager.getTranslation(guildId, 'buttonhandler.no_song_playing'),
-                    flags: [1 << 6]
+                    flags: MessageFlags.Ephemeral
                 });
             }
 
@@ -996,11 +996,11 @@ module.exports = {
                 const noLyricsMsg = await LanguageManager.getTranslation(guildId, 'buttonhandler.no_lyrics_found') || 'No lyrics found for this song.';
                 return await interaction.reply({
                     content: `🎤 ${noLyricsMsg}`,
-                    flags: [1 << 6]
+                    flags: MessageFlags.Ephemeral
                 });
             }
 
-            await interaction.deferReply({ ephemeral: true });
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
             const lyricsData = player.currentLyrics;
             const pages = LyricsManager.formatFullLyrics(lyricsData, 4000);
@@ -1115,7 +1115,7 @@ module.exports = {
             if (interaction.deferred) {
                 await interaction.editReply({ content: errorMsg });
             } else {
-                await interaction.reply({ content: errorMsg, ephemeral: true });
+                await interaction.reply({ content: errorMsg, flags: MessageFlags.Ephemeral });
             }
         }
     }

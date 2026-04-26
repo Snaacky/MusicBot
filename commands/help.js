@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 const config = require('../config');
 const LanguageManager = require('../src/LanguageManager');
 
@@ -179,7 +179,7 @@ module.exports = {
                 if (interaction.deferred && !interaction.replied) {
                     await interaction.editReply({ embeds: [errorEmbed] });
                 } else if (!interaction.replied && !interaction.deferred) {
-                    await interaction.reply({ embeds: [errorEmbed], flags: [1 << 6] });
+                    await interaction.reply({ embeds: [errorEmbed], flags: MessageFlags.Ephemeral });
                 }
             } catch (responseError) {
                 console.error('❌ Error sending help error response:', responseError);
