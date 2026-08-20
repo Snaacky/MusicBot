@@ -643,6 +643,3 @@ Add your own by copying `languages/en.json`, translating strings, and restarting
 
 
 ---
-
-
-Happy streaming, and keep the servers grooving! 🎧
