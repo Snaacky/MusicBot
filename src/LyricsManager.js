@@ -7,9 +7,8 @@ class LyricsManager {
         this.cache = new Map(); // Cache lyrics by track URL
         this.cacheTimers = new Map(); // Track cache expiration timers
         
-        // Initialize Genius client (works without token via web scraping)
-        // Token can be added later for higher rate limits: new Genius.Client(token)
-        this.geniusClient = new Genius.Client();
+        // Genius API client; the configured client ID is sent as Bearer auth
+        this.geniusClient = new Genius.Client(config.genius.clientId);
     }
 
 
@@ -157,6 +156,10 @@ class LyricsManager {
     }
 
     async fetchFromGenius(track) {
+        // Skip Genius entirely when no credentials are configured (unauthenticated
+        // calls from server IPs get HTML challenge pages back)
+        if (!config.genius.clientId) return null;
+
         try {
             const artist = track.artist || track.uploader || '';
             const title = this.cleanTrackTitle(track.title || '');

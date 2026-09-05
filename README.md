@@ -138,7 +138,6 @@ GUILD_ID=optional_guild_id_for_fast_testing
 SPOTIFY_CLIENT_ID=spotify_client_id
 SPOTIFY_CLIENT_SECRET=spotify_client_secret
 GENIUS_CLIENT_ID=optional_genius_client_id
-GENIUS_CLIENT_SECRET=optional_genius_client_secret
 STATUS=🎵 Beatra | /play
 EMBED_COLOR=#FF6B6B
 SUPPORT_SERVER=https://discord.gg/ACJQzJuckW
@@ -158,7 +157,7 @@ COOKIES_FILE=./cookies.txt
 | `bot.embedColor` | `.env`/`config.js` | Hex color for all embeds. |
 | `bot.supportServer` & `bot.website` | `.env`/`config.js` | Populates help links and README badges. |
 | `spotify.clientId` & `spotify.clientSecret` | `.env`/`config.js` | Enables Spotify search, playlist and album expansion. |
-| `genius.clientId` & `genius.clientSecret` | `.env`/`config.js` | Optional Genius API credentials for higher rate limits (works without via web scraping). |
+| `genius.clientId` | `.env`/`config.js` | Optional Genius API client ID for higher rate limits (without it, lyrics come from LRCLIB). |
 | `ytdl.cookiesFromBrowser` & `ytdl.cookiesFile` | `.env`/`config.js` | It is an optional feature to add cookies against YouTube cookie errors. |
 | `ytdl.proxy` | `.env` → `config.ytdl.proxy` | Optional HTTPS proxy (`YTDLP_PROXY_HOST`, `YTDLP_PROXY_PORT`, `YTDLP_PROXY_USERNAME`, `YTDLP_PROXY_PASSWORD`) that routes all yt-dlp requests (searches, metadata, downloads) through the proxy. Leave blank to disable. |
 
@@ -198,15 +197,14 @@ Beatra uses **web scraping** by default to fetch lyrics from Genius—no API key
    - **App Name:** `Beatra Bot` (or any name)
    - **App Website URL:** `https://localhost` (placeholder is fine)
    - **Redirect URI:** `https://localhost/callback` (not used, but required)
-3. Click **Save** and reveal your **Client ID** and **Client Secret**.
-4. Copy both values and add them to your `.env`:
+3. Click **Save** and reveal your **Client ID**.
+4. Copy it and add it to your `.env`:
    ```dotenv
    GENIUS_CLIENT_ID=your_genius_client_id
-   GENIUS_CLIENT_SECRET=your_genius_client_secret
    ```
 5. Restart the bot. The Genius client will now use API authentication.
 
-> 💡 **Note:** Even without credentials, lyrics work perfectly! The bot automatically scrapes Genius.com and falls back to LRCLIB if needed.
+> 💡 **Note:** Even without credentials, lyrics work perfectly! Without a Genius client ID the bot skips Genius entirely and uses LRCLIB.
 
 ### Lyrics Priority
 

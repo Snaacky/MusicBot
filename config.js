@@ -24,7 +24,6 @@ module.exports = {
     // Genius API Settings
     genius: {
         clientId: process.env.GENIUS_CLIENT_ID || '',
-        clientSecret: process.env.GENIUS_CLIENT_SECRET || '',
     },
 
     // Bot Settings
