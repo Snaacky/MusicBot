@@ -680,6 +680,7 @@ class MusicPlayer {
                 const youtubedl = require('youtube-dl-exec');
                 
                 await youtubedl(downloadUrl, {
+                    ...(config.ytdl.proxy && { proxy: config.ytdl.proxy }),
                     output: filepath,
                     format: 'bestaudio',
                     noCheckCertificates: true,

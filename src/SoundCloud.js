@@ -21,6 +21,7 @@ class SoundCloud {
             const searchQuery = `ytsearch${limit}:${query} site:soundcloud.com`;
 
             const results = await youtubedl(searchQuery, {
+                ...(config.ytdl.proxy && { proxy: config.ytdl.proxy }),
                 dumpSingleJson: true,
                 flatPlaylist: true,
                 noCheckCertificates: true,
@@ -61,6 +62,7 @@ class SoundCloud {
 
             // Get SoundCloud info using yt-dlp
             const info = await youtubedl(resolvedUrl, {
+                ...(config.ytdl.proxy && { proxy: config.ytdl.proxy }),
                 dumpSingleJson: true,
                 noCheckCertificates: true,
                 noWarnings: true,
@@ -86,6 +88,7 @@ class SoundCloud {
 
             // Get audio stream using yt-dlp
             const result = await youtubedl(resolvedUrl, {
+                ...(config.ytdl.proxy && { proxy: config.ytdl.proxy }),
                 format: 'bestaudio/best',
                 getUrl: true,
                 noCheckCertificates: true,
@@ -112,6 +115,7 @@ class SoundCloud {
 
             // Get playlist info using yt-dlp
             const result = await youtubedl(resolvedUrl, {
+                ...(config.ytdl.proxy && { proxy: config.ytdl.proxy }),
                 dumpSingleJson: true,
                 flatPlaylist: true,
                 noCheckCertificates: true,
@@ -155,6 +159,7 @@ class SoundCloud {
             // Use yt-dlp for SoundCloud user profile
             // Get user's latest tracks
             const result = await youtubedl(userUrl, {
+                ...(config.ytdl.proxy && { proxy: config.ytdl.proxy }),
                 dumpSingleJson: true,
                 flatPlaylist: true,
                 playlistEnd: limit,
@@ -259,6 +264,7 @@ class SoundCloud {
 
             // URL validation with yt-dlp
             const info = await youtubedl(resolvedUrl, {
+                ...(config.ytdl.proxy && { proxy: config.ytdl.proxy }),
                 dumpSingleJson: true,
                 noCheckCertificates: true,
                 noWarnings: true,

@@ -160,6 +160,7 @@ COOKIES_FILE=./cookies.txt
 | `spotify.clientId` & `spotify.clientSecret` | `.env`/`config.js` | Enables Spotify search, playlist and album expansion. |
 | `genius.clientId` & `genius.clientSecret` | `.env`/`config.js` | Optional Genius API credentials for higher rate limits (works without via web scraping). |
 | `ytdl.cookiesFromBrowser` & `ytdl.cookiesFile` | `.env`/`config.js` | It is an optional feature to add cookies against YouTube cookie errors. |
+| `ytdl.proxy` | `.env` → `config.ytdl.proxy` | Optional HTTPS proxy (`YTDLP_PROXY_HOST`, `YTDLP_PROXY_PORT`, `YTDLP_PROXY_USERNAME`, `YTDLP_PROXY_PASSWORD`) that routes all yt-dlp requests (searches, metadata, downloads) through the proxy. Leave blank to disable. |
 
 > 🔐 Never commit `.env` to source control. Use deployment secrets in your hosting provider or create environment variables at runtime.
 

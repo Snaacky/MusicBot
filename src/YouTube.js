@@ -31,6 +31,10 @@ class YouTube {
             baseOptions.extractorArgs = 'youtube:player_client=ios';
         }
 
+        if (config.ytdl.proxy) {
+            baseOptions.proxy = config.ytdl.proxy;
+        }
+
         return baseOptions;
     }
 

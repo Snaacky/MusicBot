@@ -65,6 +65,15 @@ module.exports = {
         cookiesFromBrowser: process.env.COOKIES_FROM_BROWSER || null, // 'chrome', 'firefox', 'edge', 'safari'
         cookiesFile: process.env.COOKIES_FILE || null, // './cookies.txt'
         poToken: process.env.YOUTUBE_PO_TOKEN || null, // YouTube PO Token (sunucu IP'leri için)
+        proxy: (() => {
+            const host = process.env.YTDLP_PROXY_HOST || '';
+            const port = process.env.YTDLP_PROXY_PORT || '';
+            if (!host || !port) return null;
+            const username = process.env.YTDLP_PROXY_USERNAME || '';
+            const password = process.env.YTDLP_PROXY_PASSWORD || '';
+            const auth = username ? `${encodeURIComponent(username)}:${encodeURIComponent(password)}@` : '';
+            return `https://${auth}${host}:${port}`;
+        })(),
     },
 
     // Sharding Settings (for bots in 1000+ servers)
