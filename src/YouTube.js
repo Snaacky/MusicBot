@@ -12,7 +12,7 @@ class YouTube {
             jsRuntimes: 'deno',
             addHeader: [
                 'referer:youtube.com',
-                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.3'
+                'user-agent:Mozilla/5.0 (Windows NT 6.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/71.0.2123.121 Safari/537.36'
             ],
             ...extraOptions
         };

@@ -679,23 +679,20 @@ class MusicPlayer {
             if (track.platform === 'youtube' || track.platform === 'spotify' || track.platform === 'soundcloud') {
                 const youtubedl = require('youtube-dl-exec');
                 
-                await youtubedl(downloadUrl, {
-                    ...(config.ytdl.proxy && { proxy: config.ytdl.proxy }),
+                await youtubedl(downloadUrl, YouTube.getYtDlpOptions({
                     output: filepath,
                     format: 'bestaudio',
-                    noCheckCertificates: true,
-                    noWarnings: true,
                     preferFreeFormats: true,
                     addHeader: [
                         'referer:youtube.com',
-                        'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        'user-agent:Mozilla/5.0 (Windows NT 6.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/71.0.2123.121 Safari/537.36'
                     ],
                     postprocessorArgs: {
                         'ffmpeg': ['-c:a', 'libopus', '-b:a', '128k']
                     },
                     extractAudio: true,
                     audioFormat: 'opus'
-                });
+                }));
             } else {
                 // For DirectLink - fetch and transcode with FFmpeg
                 const fetch = await ensureFetch();
