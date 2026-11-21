@@ -5,6 +5,7 @@
 bot-settings.env
 cookies.txt
 spotify-auth.json
+tidal-auth.json
 
 # Runtime state, downloaded audio, logs, and local tools
 data/

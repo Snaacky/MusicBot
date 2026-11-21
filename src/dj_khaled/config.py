@@ -149,6 +149,7 @@ class Settings:
     spotify_secret: str = field(default="", repr=False)
     spotify_market: str = "GB"
     spotify_redirect_uri: str = "http://127.0.0.1:8888/callback"
+    tidal_quality: str = "LOSSLESS"
     genius_token: str = field(default="", repr=False)
     cookies_file: str | None = field(default=None, repr=False)
     cookies_browser: str | None = None
@@ -208,6 +209,9 @@ class Settings:
         youtube_status_port = _integer(values, "YOUTUBE_STATUS_PORT", 0)
         if youtube_status_port > 65535:
             raise ValueError("YOUTUBE_STATUS_PORT must be between 0 and 65535.")
+        tidal_quality = values.get("TIDAL_QUALITY", "LOSSLESS").strip().upper()
+        if tidal_quality not in {"LOW", "HIGH", "LOSSLESS"}:
+            raise ValueError("TIDAL_QUALITY must be LOW, HIGH, or LOSSLESS.")
         return cls(
             root=root,
             app_name=values.get("APP_NAME", "DJ Khaled"),
@@ -231,6 +235,7 @@ class Settings:
             spotify_redirect_uri=values.get(
                 "SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback"
             ),
+            tidal_quality=tidal_quality,
             genius_token=values.get("GENIUS_ACCESS_TOKEN", ""),
             cookies_file=cookies,
             cookies_browser=values.get("COOKIES_FROM_BROWSER"),

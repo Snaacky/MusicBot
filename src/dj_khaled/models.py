@@ -56,6 +56,7 @@ class Track:
         if not isinstance(self.platform, str) or self.platform.casefold() not in {
             "youtube",
             "spotify",
+            "tidal",
             "soundcloud",
             "direct",
         }:

@@ -32,6 +32,7 @@ from bs4 import BeautifulSoup, SoupStrainer
 from .config import Settings
 from .models import MediaError, Track, finite_seconds
 from .spotify_auth import SpotifyUserAuth
+from .tidal import TidalService
 from .youtube_auth import check_status as check_youtube_status
 
 log = logging.getLogger(__name__)
@@ -143,6 +144,8 @@ def platform_for(query: str) -> str:
         return "youtube"
     if host in {"open.spotify.com", "spotify.link"}:
         return "spotify"
+    if host in {"tidal.com", "www.tidal.com", "listen.tidal.com"}:
+        return "tidal"
     if host == "soundcloud.com" or host.endswith(".soundcloud.com"):
         return "soundcloud"
     if host == "soundcloud.app.goo.gl":
@@ -150,7 +153,7 @@ def platform_for(query: str) -> str:
     if Path(parsed.path).suffix.casefold() in AUDIO_EXTENSIONS:
         return "direct"
     raise MediaError(
-        "That site is not supported. Use YouTube, Spotify, SoundCloud, or an audio file."
+        "That site is not supported. Use YouTube, Spotify, TIDAL, SoundCloud, or an audio file."
     )
 
 
@@ -253,6 +256,7 @@ class MediaResolver:
         self._spotify_token = ""
         self._spotify_expiry = 0.0
         self.spotify_user = SpotifyUserAuth(settings, session)
+        self.tidal = TidalService(settings)
         self._spotify_public_workers = asyncio.Semaphore(4)
         self._youtube_status_task: asyncio.Task[dict[str, Any]] | None = None
         self._youtube_status_cache: tuple[float, dict[str, Any]] | None = None
@@ -447,6 +451,7 @@ class MediaResolver:
             if not self._native_tasks[task].is_set():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        self.tidal.close()
         self._resolution_cache.clear()
         with self._extraction_lock:
             self._extraction_cache.clear()
@@ -656,6 +661,8 @@ class MediaResolver:
         platform = platform_for(query)
         if platform == "spotify":
             return await self.spotify(query)
+        if platform == "tidal":
+            return await self._run_native(lambda: self.tidal.resolve(query))
         if platform == "direct":
             return [await self.direct_info(query)]
         if _parse_url(query).scheme not in {"http", "https"}:
@@ -728,6 +735,19 @@ class MediaResolver:
     async def download(self, track: Track, directory: Path, cancel: threading.Event) -> Path:
         if track.platform == "direct":
             return await self._download_direct(track, directory, cancel)
+        if track.platform == "tidal":
+            if cancel.is_set():
+                raise MediaError("Playback request cancelled.")
+            try:
+                stream_url = await self._run_native(lambda: self.tidal.stream_url(track))
+                source = replace(track, url=public_http_url(stream_url), media_url=None)
+                result = await self._download_direct(source, directory, cancel)
+                track.duration = source.duration
+                return result
+            except MediaError as error:
+                # CDN errors may contain short-lived signed URLs. Keep them out
+                # of exception chains and retain the canonical TIDAL track URL.
+                raise MediaError(str(error)) from None
         if track.platform == "spotify" and not track.media_url:
             results = await self.search(f"{track.title} {track.artist}", 5)
             if not results:

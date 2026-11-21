@@ -26,6 +26,7 @@ from .instance import InstanceLock, legacy_process
 from .media import MediaResolver, PublicResolver
 from .models import UserError
 from .spotify_auth import login as spotify_login
+from .tidal_auth import login as tidal_login
 
 
 class RedactingFormatter(logging.Formatter):
@@ -196,6 +197,9 @@ def main() -> None:
     diagnostics.add_argument(
         "--spotify-login", action="store_true", help="Connect Spotify for playlist access"
     )
+    diagnostics.add_argument(
+        "--tidal-login", action="store_true", help="Connect a TIDAL account for direct playback"
+    )
     parser.add_argument(
         "--replace-javascript",
         action="store_true",
@@ -211,6 +215,9 @@ def main() -> None:
         logging.getLogger("discord.voice_client").setLevel(logging.DEBUG)
         if arguments.spotify_login:
             asyncio.run(spotify_login(settings))
+            return
+        if arguments.tidal_login:
+            asyncio.run(tidal_login(settings))
             return
         dependencies = validate(settings, require_token=not (arguments.check or arguments.probe))
         if arguments.check:
@@ -237,6 +244,10 @@ def main() -> None:
                         "spotify_user_login_saved": (
                             settings.data_directory / "spotify-auth.json"
                         ).is_file(),
+                        "tidal_user_login_saved": (
+                            settings.data_directory / "tidal-auth.json"
+                        ).is_file(),
+                        "tidal_quality": settings.tidal_quality,
                         "guild_ids": settings.guild_ids,
                         "javascript_bot_running": legacy_process(settings) is not None,
                     },

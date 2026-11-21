@@ -34,7 +34,7 @@ def register_commands(bot: DJKhaled) -> None:
         2, 10, key=lambda interaction: (interaction.guild_id, interaction.user.id)
     )
     @app_commands.describe(
-        query="Song name or YouTube/Spotify/SoundCloud/audio URL",
+        query="Song name or YouTube/Spotify/TIDAL/SoundCloud/audio URL",
         playlist="Allow YouTube playlist links",
     )
     async def play(interaction: discord.Interaction, query: str, playlist: bool = False) -> None:
@@ -161,6 +161,12 @@ def register_commands(bot: DJKhaled) -> None:
             name="YouTube playback",
             value="Regular tracks try guest playback first. Configured YouTube cookies are "
             "retried for bot checks and age-restricted (18+) videos.",
+            inline=False,
+        )
+        embed.add_field(
+            name="TIDAL playback",
+            value="Use /play with a TIDAL track, album, or playlist link. "
+            "Direct playback uses the bot owner's connected TIDAL account.",
             inline=False,
         )
         media = getattr(bot, "media", None)
