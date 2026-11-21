@@ -636,7 +636,7 @@ class GuildPlayer:
 
                     loop.call_soon_threadsafe(resolve)
 
-                bitrate = min(96, max(16, getattr(self.voice_channel, "bitrate", 96000) // 1000))
+                bitrate = min(512, max(16, getattr(self.voice_channel, "bitrate", 96000) // 1000))
                 voice.play(
                     stream,
                     after=complete,
@@ -650,10 +650,12 @@ class GuildPlayer:
                 if self.pause_reasons:
                     voice.pause()
                 log.info(
-                    "Playback phase server=%s phase=audio_started elapsed_ms=%.1f paused=%s",
+                    "Playback phase server=%s phase=audio_started elapsed_ms=%.1f paused=%s "
+                    "encoder_bitrate_kbps=%s",
                     self.guild.id,
                     (time.perf_counter() - preparing_started) * 1000,
                     self.paused,
+                    bitrate,
                 )
                 if self._transition_started is not None:
                     log.info(
