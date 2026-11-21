@@ -1,0 +1,45 @@
+# Local credentials and cookies
+.env
+.env.*
+!.env.example
+bot-settings.env
+cookies.txt
+spotify-auth.json
+
+# Runtime state, downloaded audio, logs, and local tools
+data/
+audio_cache/
+database/
+.cache/
+logs/
+*.log
+*.pid
+*.pid.lock
+.dj-khaled.lock
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+
+# Python environments, bytecode, and build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Development caches and coverage
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local Windows launcher and private regression suite
+/run.bat
+/tests/
+
+# Local documentation
+*.[mM][dD]
