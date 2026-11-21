@@ -1,0 +1,12 @@
+**
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!uv.lock
+!.python-version
+!LICENSE
+!src/
+!src/**
+**/__pycache__/
+**/*.py[cod]
+**/*.[mM][dD]
