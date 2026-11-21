@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -9,12 +10,13 @@ from discord import app_commands
 from .activity import added_tracks, user_action
 from .models import UserError, duration_text
 from .seek import parse_position
-from .ui import SearchView, short
+from .ui import SearchView, add_youtube_status, short
 
 if TYPE_CHECKING:
     from .bot import DJKhaled
 
 log = logging.getLogger(__name__)
+_YOUTUBE_HELP_TIMEOUT = 2
 
 
 async def dismiss_command_response(interaction: discord.Interaction) -> None:
@@ -154,6 +156,20 @@ def register_commands(bot: DJKhaled) -> None:
             "or someone with Manage Server can change playback. Anyone in that voice "
             "channel can view the queue and available lyrics.",
             inline=False,
+        )
+        media = getattr(bot, "media", None)
+        label = getattr(media, "youtube_status_label", None)
+        check = getattr(media, "youtube_status", None)
+        if callable(label) and label() == "Checking..." and callable(check):
+            try:
+                async with asyncio.timeout(_YOUTUBE_HELP_TIMEOUT):
+                    await check()
+            except TimeoutError:
+                pass
+            except Exception:
+                log.debug("YouTube sign-in status is unavailable.")
+        add_youtube_status(
+            embed, bot, checking_text="Sign-in check is still running. Open /help again shortly."
         )
         embed.set_footer(text=f"Python 3.14 · discord.py · {len(bot.guilds)} servers")
         await interaction.followup.send(embed=embed, ephemeral=True)

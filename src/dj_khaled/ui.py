@@ -89,6 +89,18 @@ def add_activity(embed: discord.Embed, player: GuildPlayer) -> discord.Embed:
     return embed
 
 
+def add_youtube_status(
+    embed: discord.Embed, bot: DJKhaled, *, checking_text: str | None = None
+) -> discord.Embed:
+    """Render the cached session label without waiting for a provider request."""
+    label = getattr(getattr(bot, "media", None), "youtube_status_label", None)
+    if callable(label) and isinstance(value := label(), str) and value:
+        if value == "Checking..." and checking_text:
+            value = checking_text
+        embed.add_field(name="YouTube sign-in", value=value, inline=False)
+    return embed
+
+
 def clamp_queue_page(player: GuildPlayer, count: int) -> int | None:
     page = getattr(player, "queue_page", None)
     if page is None:
@@ -197,6 +209,8 @@ async def now_playing(bot: DJKhaled, player: GuildPlayer) -> discord.Embed:
         value=playback,
         inline=False,
     )
+    if track.platform in {"youtube", "spotify"}:
+        add_youtube_status(embed, bot)
     if state["loop"] == LoopMode.TRACK:
         next_name = text("player.on_repeat", "On repeat")
         next_value = track_link(track)

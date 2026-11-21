@@ -31,6 +31,7 @@ from bs4 import BeautifulSoup, SoupStrainer
 from .config import Settings
 from .models import MediaError, Track, finite_seconds
 from .spotify_auth import SpotifyUserAuth
+from .youtube_auth import check_status as check_youtube_status
 
 log = logging.getLogger(__name__)
 RESOLUTION_CACHE_SECONDS = 120.0
@@ -213,7 +214,12 @@ def is_music(track: Track) -> bool:
 
 class MediaResolver:
     def __init__(
-        self, settings: Settings, session: aiohttp.ClientSession, *, read_only: bool = False
+        self,
+        settings: Settings,
+        session: aiohttp.ClientSession,
+        *,
+        read_only: bool = False,
+        on_youtube_status: Callable[[], None] | None = None,
     ) -> None:
         self.settings = settings
         self.http = session
@@ -235,6 +241,88 @@ class MediaResolver:
         self._spotify_expiry = 0.0
         self.spotify_user = SpotifyUserAuth(settings, session)
         self._spotify_public_workers = asyncio.Semaphore(4)
+        self._youtube_status_task: asyncio.Task[dict[str, Any]] | None = None
+        self._youtube_status_cache: tuple[float, dict[str, Any]] | None = None
+        self._on_youtube_status = on_youtube_status
+
+    @property
+    def youtube_auth_configured(self) -> bool:
+        return bool(
+            not self.settings.po_token
+            and (self.settings.cookies_browser or self.settings.cookies_file)
+        )
+
+    def _start_youtube_status_check(self) -> asyncio.Task[dict[str, Any]]:
+        if self._youtube_status_task is not None:
+            return self._youtube_status_task
+
+        async def check() -> dict[str, Any]:
+            result = await self._run_native(lambda: check_youtube_status(self.options()))
+            self._youtube_status_cache = (monotonic() + 30, result)
+            if self._on_youtube_status is not None:
+                self._on_youtube_status()
+            return result
+
+        task = asyncio.create_task(check(), name="youtube-login-status")
+        self._youtube_status_task = task
+
+        def finished(completed: asyncio.Task[dict[str, Any]]) -> None:
+            self._youtube_status_task = None
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finished)
+        return task
+
+    def youtube_status_label(self) -> str:
+        """Render cached sign-in state and start a shared check without waiting."""
+        if not self.youtube_auth_configured:
+            return "Guest - no account cookies configured"
+        if self._closed:
+            return "Could not verify sign-in"
+        cached = self._youtube_status_cache
+        if cached is None or monotonic() >= cached[0]:
+            self._start_youtube_status_check()
+            return "Checking..."
+        logged_in = cached[1].get("logged_in")
+        if logged_in is True:
+            return "Signed in"
+        if logged_in is False:
+            return "Signed out - update the bot's YouTube cookies"
+        return "Could not verify sign-in"
+
+    @staticmethod
+    def _youtube_auth_failure(error: Exception) -> bool:
+        return any(
+            phrase in str(error).casefold()
+            for phrase in (
+                "sign in",
+                "sign-in",
+                "log in",
+                "login required",
+                "not a bot",
+                "confirm your age",
+                "age-restricted",
+                "age restricted",
+            )
+        )
+
+    def _youtube_auth_error(self) -> MediaError:
+        label = self.youtube_status_label()
+        return MediaError(
+            f"YouTube requires authentication. YouTube sign-in: {label}. "
+            "Ask the bot owner to check account access for this track."
+        )
+
+    async def youtube_status(self) -> dict[str, Any]:
+        if self._closed:
+            raise MediaError("The media service is shutting down.")
+        cached = self._youtube_status_cache
+        if cached is not None and monotonic() < cached[0]:
+            return dict(cached[1])
+        # A timed-out HTTP caller must not spawn another cookie reader while the
+        # original native check is still running.
+        return dict(await asyncio.shield(self._start_youtube_status_check()))
 
     async def _run_native[T](self, operation: Callable[[], T]) -> T:
         if self._closed:
@@ -266,6 +354,9 @@ class MediaResolver:
 
     async def close(self) -> None:
         self._closed = True
+        if self._youtube_status_task is not None:
+            self._youtube_status_task.cancel()
+            await asyncio.gather(self._youtube_status_task, return_exceptions=True)
         tasks = list(self._native_tasks)
         for task in tasks:
             if not self._native_tasks[task].is_set():
@@ -376,11 +467,8 @@ class MediaResolver:
         try:
             return await self._run_native(run)
         except yt_dlp.utils.DownloadError as error:
-            message = str(error).casefold()
-            if "sign in" in message or "not a bot" in message:
-                raise MediaError(
-                    "YouTube requires authentication. Configure your cookie file."
-                ) from error
+            if platform_for(query) == "youtube" and self._youtube_auth_failure(error):
+                raise self._youtube_auth_error() from error
             raise MediaError(
                 "The music provider could not load that track. Try another link."
             ) from error
@@ -603,10 +691,8 @@ class MediaResolver:
             yt_dlp.utils.ExtractorError,
             yt_dlp.utils.ReExtractInfo,
         ) as error:
-            if any(word in str(error).casefold() for word in ("sign in", "not a bot")):
-                raise MediaError(
-                    "YouTube requires authentication. Configure your cookie file."
-                ) from error
+            if track.platform in {"youtube", "spotify"} and self._youtube_auth_failure(error):
+                raise self._youtube_auth_error() from error
             raise MediaError(
                 "Audio download failed. Try another link or configure cookies."
             ) from error

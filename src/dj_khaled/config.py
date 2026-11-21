@@ -154,6 +154,8 @@ class Settings:
     cookies_browser: str | None = None
     po_token: str | None = field(default=None, repr=False)
     proxy: str | None = field(default=None, repr=False)
+    youtube_status_host: str = "127.0.0.1"
+    youtube_status_port: int = 0
     dj_roles: tuple[int, ...] = ()
     shard_count: int | None = None
     sync_bot_name: bool = True
@@ -203,6 +205,9 @@ class Settings:
         client_ids = _ids(values.get("CLIENT_ID", ""), "CLIENT_ID")
         if len(client_ids) > 1:
             raise ValueError("CLIENT_ID must contain one Discord application ID.")
+        youtube_status_port = _integer(values, "YOUTUBE_STATUS_PORT", 0)
+        if youtube_status_port > 65535:
+            raise ValueError("YOUTUBE_STATUS_PORT must be between 0 and 65535.")
         return cls(
             root=root,
             app_name=values.get("APP_NAME", "DJ Khaled"),
@@ -231,6 +236,8 @@ class Settings:
             cookies_browser=values.get("COOKIES_FROM_BROWSER"),
             po_token=values.get("YOUTUBE_PO_TOKEN"),
             proxy=proxy,
+            youtube_status_host=values.get("YOUTUBE_STATUS_HOST", "127.0.0.1"),
+            youtube_status_port=youtube_status_port,
             dj_roles=_ids(values.get("DJ_ROLE_IDS", ""), "DJ_ROLE_IDS"),
             shard_count=(
                 _integer(values, "TOTAL_SHARDS", 1, 1) if shards and shards != "auto" else None

@@ -20,6 +20,7 @@ from .lyrics import LyricsService
 from .media import MediaResolver, PublicResolver
 from .models import Track, UserError
 from .player import GuildPlayer
+from .status_api import YouTubeStatusServer
 from .storage import StateStore
 from .ui import Controls, now_playing
 
@@ -77,6 +78,7 @@ class DJKhaled(discord.AutoShardedClient):
         self._closing = False
         self._close_lock = asyncio.Lock()
         self.web: aiohttp.ClientSession | None = None
+        self.youtube_status: YouTubeStatusServer | None = None
         self.media: MediaResolver
         self.cache: AudioCache
         self.lyrics: LyricsService
@@ -92,7 +94,15 @@ class DJKhaled(discord.AutoShardedClient):
             timeout=aiohttp.ClientTimeout(total=120, connect=15, sock_read=30),
             headers={"User-Agent": "DJ-Khaled/1.0 (Discord music bot)"},
         )
-        self.media = MediaResolver(self.settings, self.web)
+        self.media = MediaResolver(
+            self.settings, self.web, on_youtube_status=self._youtube_status_updated
+        )
+        if self.settings.youtube_status_port:
+            self.youtube_status = YouTubeStatusServer(self.media)
+            await self.youtube_status.start(
+                self.settings.youtube_status_host, self.settings.youtube_status_port
+            )
+            log.info("YouTube status endpoint is available at /youtube/status")
         self.cache = AudioCache(
             self.settings.data_directory / "audio", self.media, self.settings.cache_max_bytes
         )
@@ -117,6 +127,17 @@ class DJKhaled(discord.AutoShardedClient):
                 )
         self._heartbeat = asyncio.create_task(self._checkpoints(), name="session-checkpoints")
         self._progress_task = asyncio.create_task(self._progress_updates(), name="player-progress")
+
+    def _youtube_status_updated(self) -> None:
+        if self._closing:
+            return
+        for player in self.players.values():
+            if (
+                not player.closed
+                and player.current
+                and player.current.platform in {"youtube", "spotify"}
+            ):
+                self.request_refresh(player, urgent=True)
 
     async def on_ready(self) -> None:
         log.info("%s is online in %s server(s)", self.settings.app_name, len(self.guilds))
@@ -936,7 +957,7 @@ class DJKhaled(discord.AutoShardedClient):
         self._refresh_failures.clear()
         self._control_revision.clear()
         self._rendered.clear()
-        for name in ("lyrics", "cache", "media", "web"):
+        for name in ("youtube_status", "lyrics", "cache", "media", "web"):
             service = getattr(self, name, None)
             if service is not None:
                 try:
