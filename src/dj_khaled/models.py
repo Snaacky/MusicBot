@@ -42,6 +42,7 @@ class Track:
     media_url: str | None = None
     start_seconds: float = 0
     added_at: float = 0
+    age_restricted: bool = False
 
     def __post_init__(self) -> None:
         self.title = str(self.title or "Unknown track")
@@ -66,6 +67,7 @@ class Track:
         self.duration = finite_seconds(self.duration)
         self.start_seconds = finite_seconds(self.start_seconds)
         self.added_at = finite_seconds(self.added_at)
+        self.age_restricted = self.age_restricted is True
         if not self.added_at:
             self.added_at = time.time()
 
@@ -92,6 +94,7 @@ class Track:
             if "start_seconds" in data
             else finite_seconds(data.get("startOffsetMs")) / 1000,
             added_at=finite_seconds(data.get("added_at") or data.get("addedAt")),
+            age_restricted=data.get("age_restricted") is True,
         )
 
 

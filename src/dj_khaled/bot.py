@@ -136,6 +136,7 @@ class DJKhaled(discord.AutoShardedClient):
                 not player.closed
                 and player.current
                 and player.current.platform in {"youtube", "spotify"}
+                and player.current.age_restricted
             ):
                 self.request_refresh(player, urgent=True)
 

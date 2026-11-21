@@ -157,6 +157,12 @@ def register_commands(bot: DJKhaled) -> None:
             "channel can view the queue and available lyrics.",
             inline=False,
         )
+        embed.add_field(
+            name="YouTube playback",
+            value="Regular tracks play as a guest. YouTube cookies are only used for "
+            "age-restricted (18+) videos.",
+            inline=False,
+        )
         media = getattr(bot, "media", None)
         label = getattr(media, "youtube_status_label", None)
         check = getattr(media, "youtube_status", None)

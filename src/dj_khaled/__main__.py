@@ -147,13 +147,6 @@ def validate(settings: Settings, *, require_token: bool) -> dict[str, str]:
         raise UserError(
             "Opus encoding is unavailable. Install libopus for Discord voice."
         ) from None
-    if (
-        settings.cookies_file
-        and not settings.po_token
-        and not settings.cookies_browser
-        and not Path(settings.cookies_file).is_file()
-    ):
-        raise UserError("COOKIES_FILE does not identify an existing file.")
     return {
         "ffmpeg_version": ffmpeg_version.splitlines()[0],
         "deno_version": deno_version.splitlines()[0],

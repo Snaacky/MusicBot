@@ -209,7 +209,7 @@ async def now_playing(bot: DJKhaled, player: GuildPlayer) -> discord.Embed:
         value=playback,
         inline=False,
     )
-    if track.platform in {"youtube", "spotify"}:
+    if track.platform in {"youtube", "spotify"} and track.age_restricted:
         add_youtube_status(embed, bot)
     if state["loop"] == LoopMode.TRACK:
         next_name = text("player.on_repeat", "On repeat")

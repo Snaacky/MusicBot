@@ -55,7 +55,8 @@ def check_status(options: dict[str, Any]) -> dict[str, Any]:
         "configured": configured,
         "logged_in": False,
         "status": "logged_out",
-        "message": "YouTube account cookies are not enabled for playback.",
+        "message": "Guest playback is available. "
+        "Cookies are only needed for age-restricted (18+) videos.",
     }
     if not configured:
         return result
