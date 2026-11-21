@@ -56,7 +56,7 @@ def check_status(options: dict[str, Any]) -> dict[str, Any]:
         "logged_in": False,
         "status": "logged_out",
         "message": "Guest playback is available. "
-        "Cookies are only needed for age-restricted (18+) videos.",
+        "Account cookies can be used for bot-check retries and age-restricted (18+) videos.",
     }
     if not configured:
         return result

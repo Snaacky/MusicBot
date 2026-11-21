@@ -15,7 +15,8 @@ import socket
 import tempfile
 import threading
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -67,6 +68,14 @@ class _SpotifyNotFound(MediaError):
 
 class _YouTubeAgeRestricted(Exception):
     """An explicit age gate needs account credentials or account verification."""
+
+
+class _YouTubeCookieRetryFailed(Exception):
+    """Configured account cookies could not complete a YouTube bot check."""
+
+
+class _YouTubeCookieRequired(Exception):
+    """Cached metadata was obtained using an authenticated YouTube session."""
 
 
 class _SpotifyUnauthorized(Exception):
@@ -280,7 +289,7 @@ class MediaResolver:
     def youtube_status_label(self) -> str:
         """Render cached sign-in state and start a shared check without waiting."""
         if not self.youtube_auth_configured:
-            return "Guest - cookies only needed for 18+ videos"
+            return "Guest - account cookies are not configured"
         if self._closed:
             return "Could not verify sign-in"
         cached = self._youtube_status_cache
@@ -312,36 +321,54 @@ class MediaResolver:
             )
         )
 
-    def _with_age_cookies[T](
-        self, operation: Callable[[bool], T], *, youtube: bool, allow_age_retry: bool = True
+    @staticmethod
+    def _youtube_bot_failure(error: Exception) -> bool:
+        if isinstance(error, _YouTubeCookieRequired):
+            return True
+        return any(
+            phrase in str(error).casefold()
+            for phrase in ("not a bot", "unusual traffic", "automated queries")
+        )
+
+    def _with_youtube_cookies[T](
+        self, operation: Callable[[bool, bool], T], *, youtube: bool, allow_age_retry: bool = True
     ) -> T:
-        """Use account cookies only after an explicit age gate, in the same worker."""
+        """Try guests first, then configured cookies for a bot check or age gate."""
         try:
-            return operation(False)
+            return operation(False, False)
+        except yt_dlp.utils.DownloadCancelled:
+            raise
         except (
             yt_dlp.utils.DownloadError,
             yt_dlp.utils.ExtractorError,
             yt_dlp.utils.ReExtractInfo,
             _YouTubeAgeRestricted,
+            _YouTubeCookieRequired,
         ) as error:
-            if not youtube or not self._youtube_age_failure(error):
+            age_restricted = self._youtube_age_failure(error)
+            if not youtube or not (age_restricted or self._youtube_bot_failure(error)):
                 raise
-            if (
-                not allow_age_retry
-                or not self.youtube_auth_configured
-                or (
-                    not self.settings.cookies_browser
-                    and self.settings.cookies_file
-                    and not Path(self.settings.cookies_file).is_file()
-                )
-            ):
+            if age_restricted and not allow_age_retry:
                 raise _YouTubeAgeRestricted from error
+            if not self.youtube_auth_configured:
+                if age_restricted:
+                    raise _YouTubeAgeRestricted from error
+                raise
+            failure = _YouTubeAgeRestricted if age_restricted else _YouTubeCookieRetryFailed
+            if not self.settings.cookies_browser and self.settings.cookies_file:
+                try:
+                    with Path(self.settings.cookies_file).open("rb"):
+                        pass
+                except OSError, ValueError:
+                    raise failure from error
             try:
-                return operation(True)
+                return operation(True, age_restricted)
             except yt_dlp.utils.DownloadCancelled:
                 raise
             except (yt_dlp.utils.YoutubeDLError, OSError, ValueError) as auth_error:
-                raise _YouTubeAgeRestricted from auth_error
+                if self._youtube_age_failure(auth_error):
+                    raise _YouTubeAgeRestricted from auth_error
+                raise failure from auth_error
 
     @staticmethod
     def _youtube_auth_failure(error: Exception) -> bool:
@@ -364,6 +391,12 @@ class MediaResolver:
         return MediaError(
             "This video is age-restricted (18+) and requires a signed-in, age-verified "
             f"YouTube account. YouTube sign-in: {label}."
+        )
+
+    def _youtube_cookie_error(self) -> MediaError:
+        return MediaError(
+            "YouTube's bot check could not be completed with the configured cookies. "
+            f"YouTube sign-in: {self.youtube_status_label()}. Check the cookies and try again."
         )
 
     async def youtube_status(self) -> dict[str, Any]:
@@ -418,7 +451,9 @@ class MediaResolver:
         with self._extraction_lock:
             self._extraction_cache.clear()
 
-    def _remember_extraction(self, query: str, info: dict[str, Any]) -> None:
+    def _remember_extraction(
+        self, query: str, info: dict[str, Any], *, requires_cookies: bool = False
+    ) -> None:
         identity = _youtube_video_id(query)
         formats = info.get("formats")
         live_status = info.get("live_status")
@@ -448,6 +483,8 @@ class MediaResolver:
             # This is the same portable representation yt-dlp accepts for an
             # info-file download. Drop old filename/selection/private state.
             portable = _sanitize_download_info(info, remove_private_keys=True)
+            if requires_cookies:
+                portable["_dj_khaled_requires_cookies"] = True
             if len(json.dumps(portable).encode()) > 2 * 1024 * 1024:
                 return
         except MediaError, TypeError, ValueError, OverflowError, RecursionError:
@@ -509,20 +546,32 @@ class MediaResolver:
             options["proxy"] = self.settings.proxy
         return options | extra
 
+    @contextmanager
+    def _downloader(self, *, use_cookies: bool, **extra: Any) -> Iterator[yt_dlp.YoutubeDL]:
+        options = self.options(use_cookies=use_cookies, **extra)
+        with yt_dlp.YoutubeDL(options) as downloader:
+            if options.get("cookiefile"):
+                try:
+                    # Keep exported cookies readable on read-only Docker mounts.
+                    _ = downloader.cookiejar
+                finally:
+                    downloader.params["cookiefile"] = None
+            yield downloader
+
     async def extract(self, query: str, **options: Any) -> dict[str, Any]:
         youtube = platform_for(query) == "youtube"
 
-        def retrieve(use_cookies: bool) -> dict[str, Any]:
-            with yt_dlp.YoutubeDL(self.options(use_cookies=use_cookies, **options)) as downloader:
+        def retrieve(use_cookies: bool, age_restricted: bool) -> dict[str, Any]:
+            with self._downloader(use_cookies=use_cookies, **options) as downloader:
                 info = downloader.extract_info(query, download=False) or {}
-                if use_cookies:
+                if age_restricted:
                     info["age_limit"] = max(18, finite_seconds(info.get("age_limit")))
-                self._remember_extraction(query, info)
+                self._remember_extraction(query, info, requires_cookies=use_cookies)
                 return info
 
         try:
             return await self._run_native(
-                lambda: self._with_age_cookies(
+                lambda: self._with_youtube_cookies(
                     retrieve,
                     youtube=youtube,
                     allow_age_retry=(
@@ -533,6 +582,8 @@ class MediaResolver:
             )
         except _YouTubeAgeRestricted as error:
             raise self._youtube_auth_error() from error
+        except _YouTubeCookieRetryFailed as error:
+            raise self._youtube_cookie_error() from error
         except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as error:
             if youtube and self._youtube_auth_failure(error):
                 raise MediaError(
@@ -691,7 +742,7 @@ class MediaResolver:
             track.media_url = candidate.url
             track.age_restricted = candidate.age_restricted
 
-        def run(use_cookies: bool) -> Path:
+        def run(use_cookies: bool, age_restricted: bool) -> Path:
             def progress(status: dict[str, Any]) -> None:
                 if cancel.is_set():
                     raise yt_dlp.utils.DownloadCancelled("Playback request cancelled")
@@ -706,19 +757,18 @@ class MediaResolver:
                 and not use_cookies
             ):
                 raise _YouTubeAgeRestricted
-            if use_cookies:
+            if age_restricted:
                 track.age_restricted = True
             query = track.media_url or track.url
 
             def retrieve(output: Path, cached: dict[str, Any] | None = None) -> Path:
-                options = self.options(
+                with self._downloader(
                     use_cookies=use_cookies,
                     format="bestaudio/best",
                     outtmpl=str(output / "source.%(ext)s"),
                     max_filesize=self.settings.max_download_bytes,
                     progress_hooks=[progress],
-                )
-                with yt_dlp.YoutubeDL(options) as downloader:
+                ) as downloader:
                     info = (
                         downloader.process_ie_result(cached, download=True)
                         if cached is not None
@@ -740,9 +790,8 @@ class MediaResolver:
                     return result
 
             if use_cookies:
-                # Never reuse a guest .part file or an authenticated format from
-                # a different attempt when retrying a confirmed age gate.
-                output = Path(tempfile.mkdtemp(prefix="age-", dir=directory)).resolve()
+                # Authenticated retries must not reuse a guest .part file.
+                output = Path(tempfile.mkdtemp(prefix="authenticated-", dir=directory)).resolve()
                 if not output.is_relative_to(directory.resolve()):
                     raise MediaError("The audio download directory is unavailable.")
                 return retrieve(output)
@@ -753,6 +802,8 @@ class MediaResolver:
                 if finite_seconds(info.get("age_limit")) >= 18:
                     track.age_restricted = True
                     raise _YouTubeAgeRestricted
+                if info.pop("_dj_khaled_requires_cookies", False):
+                    raise _YouTubeCookieRequired
                 # An isolated attempt prevents stale .part files or a completed
                 # stale attempt being mistaken for the fresh fallback's output.
                 attempt = Path(tempfile.mkdtemp(prefix="cached-", dir=directory)).resolve()
@@ -767,11 +818,15 @@ class MediaResolver:
                     yt_dlp.utils.DownloadError,
                     yt_dlp.utils.ExtractorError,
                     yt_dlp.utils.ReExtractInfo,
-                ):
+                ) as error:
                     with self._extraction_lock:
                         self._extraction_cache.pop(identity, None)
                     if cancel.is_set():
                         raise yt_dlp.utils.DownloadCancelled("Playback request cancelled") from None
+                    if track.platform in {"youtube", "spotify"} and (
+                        self._youtube_bot_failure(error) or self._youtube_age_failure(error)
+                    ):
+                        raise
                     # Retry one URL extraction with the same permit and limits.
                     # DownloadCancelled (including size limits) bypasses this.
                 finally:
@@ -781,13 +836,15 @@ class MediaResolver:
 
         try:
             return await self._run_native(
-                lambda: self._with_age_cookies(
+                lambda: self._with_youtube_cookies(
                     run, youtube=track.platform in {"youtube", "spotify"}
                 )
             )
         except _YouTubeAgeRestricted as error:
             track.age_restricted = True
             raise self._youtube_auth_error() from error
+        except _YouTubeCookieRetryFailed as error:
+            raise self._youtube_cookie_error() from error
         except (
             yt_dlp.utils.DownloadError,
             yt_dlp.utils.ExtractorError,

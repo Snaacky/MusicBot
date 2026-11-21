@@ -159,8 +159,8 @@ def register_commands(bot: DJKhaled) -> None:
         )
         embed.add_field(
             name="YouTube playback",
-            value="Regular tracks play as a guest. YouTube cookies are only used for "
-            "age-restricted (18+) videos.",
+            value="Regular tracks try guest playback first. Configured YouTube cookies are "
+            "retried for bot checks and age-restricted (18+) videos.",
             inline=False,
         )
         media = getattr(bot, "media", None)
