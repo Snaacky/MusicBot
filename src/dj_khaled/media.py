@@ -18,7 +18,6 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
-from difflib import SequenceMatcher
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -32,7 +31,7 @@ from bs4 import BeautifulSoup, SoupStrainer
 from .config import Settings
 from .models import MediaError, Track, finite_seconds
 from .spotify_auth import SpotifyUserAuth
-from .tidal import TidalService
+from .tidal import TidalService, tidal_link
 from .youtube_auth import check_status as check_youtube_status
 
 log = logging.getLogger(__name__)
@@ -735,32 +734,53 @@ class MediaResolver:
     async def download(self, track: Track, directory: Path, cancel: threading.Event) -> Path:
         if track.platform == "direct":
             return await self._download_direct(track, directory, cancel)
-        if track.platform == "tidal":
+        if track.platform in {"tidal", "spotify"}:
             if cancel.is_set():
                 raise MediaError("Playback request cancelled.")
             try:
-                stream_url = await self._run_native(lambda: self.tidal.stream_url(track))
-                source = replace(track, url=public_http_url(stream_url), media_url=None)
+                source = track
+                if track.platform == "spotify":
+                    track.age_restricted = False
+                    tidal_url = None
+                    if track.media_url:
+                        try:
+                            kind, identity = tidal_link(track.media_url)
+                            if kind == "track":
+                                tidal_url = f"https://tidal.com/browse/track/{identity}"
+                        except MediaError:
+                            pass
+                    duration = track.duration
+                    if tidal_url is None:
+                        # Discard saved matches from the previous YouTube backend.
+                        track.media_url = None
+                        matched = await self._run_native(lambda: self.tidal.match(track))
+                        kind, identity = tidal_link(matched.url)
+                        if matched.platform != "tidal" or kind != "track":
+                            raise MediaError(
+                                "TIDAL returned an invalid match for this Spotify song."
+                            )
+                        tidal_url = f"https://tidal.com/browse/track/{identity}"
+                        duration = matched.duration or duration
+                    track.media_url = tidal_url
+                    source = replace(
+                        track,
+                        url=tidal_url,
+                        platform="tidal",
+                        media_url=None,
+                        duration=duration,
+                        age_restricted=False,
+                    )
+                    if cancel.is_set():
+                        raise MediaError("Playback request cancelled.")
+                stream_url = await self._run_native(lambda: self.tidal.stream_url(source))
+                source = replace(source, url=public_http_url(stream_url), media_url=None)
                 result = await self._download_direct(source, directory, cancel)
                 track.duration = source.duration
                 return result
             except MediaError as error:
                 # CDN errors may contain short-lived signed URLs. Keep them out
-                # of exception chains and retain the canonical TIDAL track URL.
+                # of exception chains and retain the original music-service URL.
                 raise MediaError(str(error)) from None
-        if track.platform == "spotify" and not track.media_url:
-            results = await self.search(f"{track.title} {track.artist}", 5)
-            if not results:
-                raise MediaError("No YouTube match was found for that Spotify song.")
-
-            candidate = max(results, key=lambda item: self._spotify_match_score(track, item))
-            if self._spotify_match_score(track, candidate) < 0.65:
-                raise MediaError(
-                    "No reliable YouTube match was found for that Spotify song. "
-                    "Try /search with its title and artist."
-                )
-            track.media_url = candidate.url
-            track.age_restricted = candidate.age_restricted
 
         def run(use_cookies: bool, age_restricted: bool) -> Path:
             def progress(status: dict[str, Any]) -> None:
@@ -771,11 +791,7 @@ class MediaResolver:
 
             if cancel.is_set():
                 raise MediaError("Playback request cancelled.")
-            if (
-                track.platform in {"youtube", "spotify"}
-                and track.age_restricted
-                and not use_cookies
-            ):
+            if track.platform == "youtube" and track.age_restricted and not use_cookies:
                 raise _YouTubeAgeRestricted
             if age_restricted:
                 track.age_restricted = True
@@ -843,7 +859,7 @@ class MediaResolver:
                         self._extraction_cache.pop(identity, None)
                     if cancel.is_set():
                         raise yt_dlp.utils.DownloadCancelled("Playback request cancelled") from None
-                    if track.platform in {"youtube", "spotify"} and (
+                    if track.platform == "youtube" and (
                         self._youtube_bot_failure(error) or self._youtube_age_failure(error)
                     ):
                         raise
@@ -856,9 +872,7 @@ class MediaResolver:
 
         try:
             return await self._run_native(
-                lambda: self._with_youtube_cookies(
-                    run, youtube=track.platform in {"youtube", "spotify"}
-                )
+                lambda: self._with_youtube_cookies(run, youtube=track.platform == "youtube")
             )
         except _YouTubeAgeRestricted as error:
             track.age_restricted = True
@@ -870,7 +884,7 @@ class MediaResolver:
             yt_dlp.utils.ExtractorError,
             yt_dlp.utils.ReExtractInfo,
         ) as error:
-            if track.platform in {"youtube", "spotify"} and self._youtube_auth_failure(error):
+            if track.platform == "youtube" and self._youtube_auth_failure(error):
                 raise MediaError(
                     "YouTube blocked guest access to this video. "
                     "Try again later or choose another track."
@@ -878,74 +892,6 @@ class MediaResolver:
             raise MediaError(
                 "Audio download failed. Try another link or try again later."
             ) from error
-
-    @staticmethod
-    def _spotify_match_score(track: Track, candidate: Track) -> float:
-        def normalized(value: str) -> str:
-            return re.sub(r"[^\w]+", " ", value.casefold()).strip()
-
-        def title(value: str) -> str:
-            value = re.sub(
-                r"[\[(](?:official (?:music )?(?:video|audio)|"
-                r"lyrics?|audio|video|visualizer|hd|4k)[)\]]",
-                "",
-                value,
-                flags=re.IGNORECASE,
-            )
-            value = re.sub(
-                r"\s+(?:[-–—|]\s*)?(?:official (?:music )?(?:video|audio)|lyrics?|hd|4k)$",
-                "",
-                value,
-                flags=re.IGNORECASE,
-            )
-            value = re.sub(r"\s+(?:ft\.?|feat\.?|featuring)\s+.+$", "", value, flags=re.IGNORECASE)
-            return normalized(value)
-
-        wanted_artist = normalized(track.artist.split(",")[0])
-        actual_artist = normalized(
-            re.sub(
-                r"(?:vevo|\s*(?:-\s*)?topic|\s+official)$",
-                "",
-                candidate.artist,
-                flags=re.IGNORECASE,
-            )
-        )
-        wanted_title, actual_title = title(track.title), title(candidate.title)
-        artist_in_title = bool(
-            wanted_artist
-            and (actual_title == wanted_artist or actual_title.startswith(wanted_artist + " "))
-        )
-        if artist_in_title:
-            actual_title = actual_title[len(wanted_artist) :].strip()
-        if wanted_artist and wanted_title.startswith(wanted_artist + " "):
-            wanted_title = wanted_title[len(wanted_artist) :].strip()
-        artist_score = SequenceMatcher(None, wanted_artist, actual_artist).ratio()
-        if artist_in_title:
-            artist_score = 1.0
-        title_score = SequenceMatcher(None, wanted_title, actual_title).ratio()
-        if not wanted_artist or not wanted_title or artist_score < 0.6 or title_score < 0.65:
-            return -1
-        for version in (
-            "cover",
-            "karaoke",
-            "instrumental",
-            "live",
-            "remix",
-            "sped up",
-            "slowed",
-            "nightcore",
-        ):
-            if bool(re.search(rf"\b{version}\b", actual_title)) != bool(
-                re.search(rf"\b{version}\b", wanted_title)
-            ):
-                return -1
-        duration_penalty = 0.0
-        if track.duration and candidate.duration:
-            difference = abs(track.duration - candidate.duration)
-            if difference > max(20, track.duration * 0.2):
-                return -1
-            duration_penalty = difference / track.duration * 0.2
-        return title_score * 0.75 + artist_score * 0.25 - duration_penalty
 
     async def _download_direct(
         self, track: Track, directory: Path, cancel: threading.Event
@@ -1504,6 +1450,7 @@ class MediaResolver:
             )
             urls = data.get("external_urls")
             url = urls.get("spotify") if isinstance(urls, dict) else None
+            external_ids = data.get("external_ids")
             try:
                 duration = float(data.get("duration_ms") or 0) / 1000
             except TypeError, ValueError:
@@ -1518,6 +1465,7 @@ class MediaResolver:
                     duration=duration,
                     thumbnail=thumbnail,
                     platform="spotify",
+                    isrc=external_ids.get("isrc") if isinstance(external_ids, dict) else None,
                 )
             )
         return tracks

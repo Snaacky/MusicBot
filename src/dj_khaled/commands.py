@@ -165,8 +165,9 @@ def register_commands(bot: DJKhaled) -> None:
         )
         embed.add_field(
             name="TIDAL playback",
-            value="Use /play with a TIDAL track, album, or playlist link. "
-            "Direct playback uses the bot owner's connected TIDAL account.",
+            value="Use /play with TIDAL or Spotify links. Audio comes from the bot owner's "
+            "connected TIDAL account. Spotify tracks need a matching TIDAL recording; "
+            "there is no automatic YouTube fallback.",
             inline=False,
         )
         media = getattr(bot, "media", None)

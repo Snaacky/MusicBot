@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import time
 from dataclasses import asdict, dataclass
 from enum import StrEnum
@@ -14,6 +15,13 @@ def finite_seconds(value: object) -> float:
     except TypeError, ValueError, OverflowError:
         return 0.0
     return number if math.isfinite(number) and number >= 0 else 0.0
+
+
+def normalize_isrc(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip().replace("-", "").upper()
+    return value if re.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}[0-9]{7}", value) else None
 
 
 class LoopMode(StrEnum):
@@ -43,6 +51,7 @@ class Track:
     start_seconds: float = 0
     added_at: float = 0
     age_restricted: bool = False
+    isrc: str | None = None
 
     def __post_init__(self) -> None:
         self.title = str(self.title or "Unknown track")
@@ -69,12 +78,16 @@ class Track:
         self.start_seconds = finite_seconds(self.start_seconds)
         self.added_at = finite_seconds(self.added_at)
         self.age_restricted = self.age_restricted is True
+        self.isrc = normalize_isrc(self.isrc)
         if not self.added_at:
             self.added_at = time.time()
 
     @property
     def cache_key(self) -> str:
-        return hashlib.sha256(self.url.encode()).hexdigest()
+        # Existing Spotify cache files may contain YouTube audio. Changing the
+        # backend must not replay those files or change keys during a download.
+        identity = "spotify:tidal:v1:" + self.url if self.platform == "spotify" else self.url
+        return hashlib.sha256(identity.encode()).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -96,6 +109,7 @@ class Track:
             else finite_seconds(data.get("startOffsetMs")) / 1000,
             added_at=finite_seconds(data.get("added_at") or data.get("addedAt")),
             age_restricted=data.get("age_restricted") is True,
+            isrc=data.get("isrc"),
         )
 
 

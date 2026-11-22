@@ -7,19 +7,154 @@ import binascii
 import ipaddress
 import json
 import re
+import unicodedata
 from collections.abc import Callable
+from html import unescape
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
 
+import tidalapi
+from tidalapi.exceptions import InvalidISRC, ObjectNotFound
+
 from .config import Settings
-from .models import MediaError, Track, finite_seconds
+from .models import MediaError, Track, finite_seconds, normalize_isrc
 from .tidal_auth import TidalUserAuth
 
 _HOSTS = frozenset({"tidal.com", "www.tidal.com", "listen.tidal.com"})
 _MANIFEST_LIMIT = 2 * 1024 * 1024
 _BTS = "application/vnd.tidal.bts"
 _NUMERIC_ID = re.compile(r"[1-9][0-9]{0,19}")
+_MATCH_LIMIT = 10
+_NO_MATCH = "No reliable TIDAL match was found for that Spotify song. Try a TIDAL track link."
+_VERSION_WORDS = {
+    "cover": r"\bcover(?:ed)?\b",
+    "karaoke": r"\bkaraoke\b",
+    "instrumental": r"\binstrumental\b",
+    "live": r"\blive\b",
+    "remix": r"\bremix(?:ed)?\b",
+    "acoustic": r"\bacoustic\b",
+    "demo": r"\bdemo\b",
+    "edit": r"\bedit\b",
+    "radio": r"\bradio\b",
+    "single": r"\bsingle\b",
+    "extended": r"\bextended\b",
+    "sped up": r"\b(?:sped|speed)\s+up\b",
+    "slowed": r"\bslowed\b",
+    "nightcore": r"\bnightcore\b",
+    "remaster": r"\bremaster(?:ed)?\b",
+    "rerecorded": r"\bre[\s-]?record(?:ed|ing)\b",
+    "mono": r"\bmono\b",
+    "stereo": r"\bstereo\b",
+}
+
+
+def _normalized(value: str) -> str:
+    value = unicodedata.normalize("NFKD", unescape(value).casefold())
+    value = "".join(character for character in value if not unicodedata.combining(character))
+    return " ".join(re.findall(r"[^\W_]+", value, re.UNICODE))
+
+
+def _artist_credits(value: str) -> frozenset[str]:
+    return frozenset(
+        name
+        for item in re.split(r"\s*(?:,|;|&|\band\b)\s*", value, flags=re.IGNORECASE)
+        if (name := _normalized(item))
+    )
+
+
+def _title_identity(value: str) -> tuple[str, tuple[tuple[Any, ...], ...]]:
+    versions: list[tuple[Any, ...]] = []
+
+    def qualifier(text: str) -> str:
+        text = text.strip()
+        if re.match(r"^(?:feat\.?|ft\.?|featuring)\s+", text, re.IGNORECASE):
+            return ""
+        normalized = _normalized(text)
+        if normalized in {
+            "album version",
+            "original version",
+            "studio version",
+            "original mix",
+            "official audio",
+            "official video",
+            "audio",
+            "lyrics",
+        }:
+            return ""
+        flags = tuple(
+            sorted(
+                name
+                for name, pattern in _VERSION_WORDS.items()
+                if re.search(pattern, text, re.IGNORECASE)
+            )
+        )
+        if not flags:
+            return text
+        years = tuple(sorted(re.findall(r"\b(?:19|20)[0-9]{2}\b", text)))
+        remainder = re.sub(r"\b(?:19|20)[0-9]{2}\b", " ", text)
+        for pattern in _VERSION_WORDS.values():
+            remainder = re.sub(pattern, " ", remainder, flags=re.IGNORECASE)
+        remainder = re.sub(
+            r"\b(?:version|mix|by|at|from|recorded|digital)\b", " ", remainder, flags=re.IGNORECASE
+        )
+        versions.append((flags, years, _normalized(remainder)))
+        return ""
+
+    value = re.sub(
+        r"\(([^()]*)\)|\[([^\[\]]*)\]",
+        lambda match: " " + qualifier(match.group(1) or match.group(2) or "") + " ",
+        value,
+    )
+    parts = re.split(r"\s+[–—-]\s+", value)
+    value = " ".join([parts[0], *(qualifier(part) for part in parts[1:])])
+    value = re.sub(r"\s+(?:feat\.?|ft\.?|featuring)\s+.*$", "", value, flags=re.IGNORECASE)
+    return _normalized(value), tuple(sorted(versions))
+
+
+def _match_score(wanted: Track, candidate: Track) -> float:
+    wanted_artist, actual_artist = _normalized(wanted.artist), _normalized(candidate.artist)
+    if not wanted_artist or not actual_artist:
+        return -1
+    if wanted_artist != actual_artist and (
+        _artist_credits(wanted.artist) != _artist_credits(candidate.artist)
+    ):
+        return -1
+    featured = r"\b(?:feat\.?|ft\.?|featuring)\s+([^\])]+)"
+    wanted_featured = re.findall(featured, wanted.title, re.IGNORECASE)
+    actual_featured = re.findall(featured, candidate.title, re.IGNORECASE)
+    if (
+        wanted_featured
+        and actual_featured
+        and (
+            _artist_credits(" ".join(wanted_featured)) != _artist_credits(" ".join(actual_featured))
+        )
+    ):
+        return -1
+    if (
+        wanted_featured
+        and not actual_featured
+        and not (_artist_credits(" ".join(wanted_featured)) <= _artist_credits(candidate.artist))
+    ):
+        return -1
+    if (
+        actual_featured
+        and not wanted_featured
+        and not (_artist_credits(" ".join(actual_featured)) <= _artist_credits(wanted.artist))
+    ):
+        return -1
+    title, versions = _title_identity(wanted.title)
+    if not title or (title, versions) != _title_identity(candidate.title):
+        return -1
+    if wanted.isrc and candidate.isrc and wanted.isrc != candidate.isrc:
+        return -1
+    if wanted.duration and candidate.duration:
+        tolerance = max(3, min(8, wanted.duration * 0.04))
+        difference = abs(wanted.duration - candidate.duration)
+        if difference > tolerance:
+            return -1
+        return 1 - 0.05 * difference / tolerance
+    return 0.95
 
 
 def tidal_link(query: str) -> tuple[str, str]:
@@ -109,6 +244,7 @@ def _model_track(item: Any) -> Track | None:
         thumbnail=thumbnail,
         url=f"https://tidal.com/browse/track/{identity}",
         platform="tidal",
+        isrc=normalize_isrc(getattr(item, "isrc", None)),
     )
 
 
@@ -163,6 +299,57 @@ class TidalService:
             return tracks
 
         return self._run(metadata, "TIDAL could not load that music. Try another TIDAL link.")
+
+    def match(self, track: Track) -> Track:
+        """Find a playable recording using ISRC first, then conservative metadata."""
+        if not track.title.strip() or not track.artist.strip():
+            raise MediaError(_NO_MATCH)
+
+        def matching(session: Any) -> Track:
+            def best(items: list[Any]) -> Track | None:
+                ranked = [
+                    (score, candidate)
+                    for item in items[:_MATCH_LIMIT]
+                    if (candidate := _model_track(item)) is not None
+                    and (score := _match_score(track, candidate)) >= 0.95
+                ]
+                return max(ranked, key=lambda item: item[0])[1] if ranked else None
+
+            isrc = normalize_isrc(track.isrc)
+            if isrc:
+                try:
+                    result = session.request.request(
+                        "GET",
+                        "tracks",
+                        params={"filter[isrc]": isrc},
+                        base_url=session.config.openapi_v2_location,
+                    ).json()
+                except ObjectNotFound, InvalidISRC:
+                    result = {"data": []}
+                if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+                    raise MediaError("TIDAL returned invalid recording information.")
+                candidates = []
+                for item in result["data"][:_MATCH_LIMIT]:
+                    if not isinstance(item, dict) or not _NUMERIC_ID.fullmatch(
+                        str(item.get("id", ""))
+                    ):
+                        continue
+                    try:
+                        candidates.append(session.track(str(item["id"])))
+                    except ObjectNotFound:
+                        continue
+                if (candidate := best(candidates)) is not None:
+                    return candidate
+            title, _versions = _title_identity(track.title)
+            query = f"{track.artist[:240]} {title[:250]}"
+            result = session.search(query, models=[tidalapi.Track], limit=_MATCH_LIMIT)
+            if not isinstance(result, dict) or not isinstance(result.get("tracks"), list):
+                raise MediaError("TIDAL returned invalid search information.")
+            if (candidate := best(result["tracks"])) is not None:
+                return candidate
+            raise MediaError(_NO_MATCH)
+
+        return self._run(matching, "TIDAL could not match that Spotify song. Please try again.")
 
     def stream_url(self, track: Track) -> str:
         kind, identity = tidal_link(track.url)

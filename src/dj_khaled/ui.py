@@ -174,6 +174,8 @@ async def now_playing(bot: DJKhaled, player: GuildPlayer) -> discord.Embed:
     embed.title = track.title[:256]
     embed.url = track.url
     source = text("commands.nowplaying.platform_name_" + track.platform, track.platform.title())
+    if track.platform == "spotify":
+        source += " · TIDAL audio"
     detail = [short(track.artist, 160), source]
     embed.description = " · ".join(item for item in detail if item)
     if track.requester_id:
@@ -209,7 +211,7 @@ async def now_playing(bot: DJKhaled, player: GuildPlayer) -> discord.Embed:
         value=playback,
         inline=False,
     )
-    if track.platform in {"youtube", "spotify"} and track.age_restricted:
+    if track.platform == "youtube" and track.age_restricted:
         add_youtube_status(embed, bot)
     if state["loop"] == LoopMode.TRACK:
         next_name = text("player.on_repeat", "On repeat")
