@@ -35,6 +35,8 @@ def tidal_link(query: str) -> tuple[str, str]:
         ):
             raise ValueError
         parts = parsed.path.strip("/").split("/")
+        if parts[-1] == "u":
+            parts = parts[:-1]
         if parts and parts[0] == "browse":
             parts = parts[1:]
         if len(parts) == 4 and parts[0] == "album" and parts[2] == "track":
