@@ -44,8 +44,17 @@ EXTRACTION_CACHE_SECONDS = 60.0
 EXTRACTION_CACHE_ENTRIES = 16
 # Look past leading live streams when a text query only needs one song.
 SEARCH_CANDIDATES = 5
-# yt-dlp's defaults, then other YouTube clients which accept account cookies.
-ACCOUNT_CLIENTS = ("default", "tv_downgraded", "web_safari", "mweb")
+# Ways to request audio with the configured YouTube account, in order.
+ACCOUNT_OPTIONS: tuple[dict[str, list[str]], ...] = (
+    {},
+    # Another build of the same player, for when yt-dlp cannot solve the first.
+    {"player_js_variant": ["es6"]},
+    # Other clients which accept account cookies.
+    {
+        "player_js_variant": ["es6"],
+        "player_client": ["default", "tv_downgraded", "web_safari", "mweb"],
+    },
+)
 LIVE_STREAM_ERROR = "Live streams are not supported. Choose a regular song or video."
 DOWNLOAD_LIMIT_ERROR = "The audio file exceeds the download limit."
 # Some provider links wrap another URL. Without the generic extractor, yt-dlp
@@ -84,6 +93,10 @@ class _YouTubeAgeRestricted(Exception):
     """An explicit age gate needs account credentials or account verification."""
 
 
+class _YouTubeUnsolved(yt_dlp.utils.DownloadError):
+    """yt-dlp could not solve the player's challenges, whatever it then reported."""
+
+
 class _YouTubeBotCheck(Exception):
     """YouTube bot verification blocked playback after the available attempts."""
 
@@ -104,6 +117,7 @@ class _DownloaderLogger:
 
     def __init__(self) -> None:
         self._warnings: list[str] = []
+        self.unsolved = False
 
     def debug(self, _message: str) -> None:
         pass
@@ -112,6 +126,7 @@ class _DownloaderLogger:
         # Browser-cookie warnings can include private paths, so keep only YouTube's.
         if message.startswith("[youtube") and message not in self._warnings:
             self._warnings.append(message)
+            self.unsolved = self.unsolved or "solving failed" in message
         log.debug("yt-dlp: %s", message)
 
     def error(self, message: str) -> None:
@@ -349,7 +364,7 @@ class MediaResolver:
         self._youtube_status_task: asyncio.Task[dict[str, Any]] | None = None
         self._youtube_status_cache: tuple[float, dict[str, Any]] | None = None
         self._on_youtube_status = on_youtube_status
-        self._more_account_clients = False
+        self._account_option = 0
 
     @property
     def youtube_auth_configured(self) -> bool:
@@ -434,7 +449,7 @@ class MediaResolver:
                     with Path(self.settings.cookies_file).open("rb"):
                         pass
                 log.info("Using configured YouTube cookies.")
-                return self._with_account_clients(lambda: operation(True, age_restricted))
+                return self._with_account_options(lambda: operation(True, age_restricted))
             except yt_dlp.utils.DownloadCancelled:
                 raise
             except (
@@ -476,31 +491,42 @@ class MediaResolver:
                 raise _YouTubeCookieRetryFailed from error
             raise
 
-    def _with_account_clients[T](self, operation: Callable[[], T]) -> T:
-        """Retry once when yt-dlp's default clients give this account no audio."""
-        if self._more_account_clients:
-            return operation()
+    def _with_account_options[T](self, operation: Callable[[], T]) -> T:
+        """Try the other ways to request audio when the usual one returns none."""
+        usual = self._account_option
         try:
             return operation()
         except yt_dlp.utils.YoutubeDLError as error:
             if not self._youtube_format_failure(error):
                 raise
-        log.info("YouTube gave the account no audio; trying more of its clients.")
-        self._more_account_clients = True
-        try:
-            return operation()
-        except BaseException:
-            self._more_account_clients = False
-            raise
+            failure = error
+        for option in range(len(ACCOUNT_OPTIONS)):
+            if option == usual:
+                continue
+            log.info("YouTube gave the account no audio; trying another way.")
+            self._account_option = option
+            worked = False
+            try:
+                result = operation()
+                worked = True
+                return result
+            except yt_dlp.utils.YoutubeDLError as error:
+                if not self._youtube_format_failure(error):
+                    raise
+            finally:
+                if not worked:
+                    self._account_option = usual
+        raise failure
 
     @staticmethod
     def _youtube_format_failure(error: Exception) -> bool:
-        return any(
+        return isinstance(error, _YouTubeUnsolved) or any(
             phrase in str(error).casefold()
             for phrase in (
                 "requested format is not available",
                 "no video formats found",
                 "drm protected",
+                "page needs to be reloaded",
             )
         )
 
@@ -729,8 +755,8 @@ class MediaResolver:
         if self.settings.po_token:
             # YouTube gives the web client no audio URLs, so keep the other clients.
             youtube["po_token"] = [f"web+{self.settings.po_token}"]
-        if use_cookies and self._more_account_clients:
-            youtube["player_client"] = list(ACCOUNT_CLIENTS)
+        if use_cookies:
+            youtube |= copy.deepcopy(ACCOUNT_OPTIONS[self._account_option])
         if youtube:
             options["extractor_args"] = {"youtube": youtube}
         if use_cookies and self.settings.cookies_browser:
@@ -754,7 +780,12 @@ class MediaResolver:
                     _ = downloader.cookiejar
                 finally:
                     downloader.params["cookiefile"] = None
-            yield downloader
+            try:
+                yield downloader
+            except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as error:
+                if options["logger"].unsolved:
+                    raise _YouTubeUnsolved(str(error)) from error
+                raise
 
     async def extract(self, query: str, **options: Any) -> dict[str, Any]:
         youtube = platform_for(query) == "youtube"
