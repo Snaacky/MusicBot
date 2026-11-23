@@ -44,6 +44,8 @@ EXTRACTION_CACHE_SECONDS = 60.0
 EXTRACTION_CACHE_ENTRIES = 16
 # Look past leading live streams when a text query only needs one song.
 SEARCH_CANDIDATES = 5
+# yt-dlp's defaults, then other YouTube clients which accept account cookies.
+ACCOUNT_CLIENTS = ("default", "tv_downgraded", "web_safari", "mweb")
 LIVE_STREAM_ERROR = "Live streams are not supported. Choose a regular song or video."
 DOWNLOAD_LIMIT_ERROR = "The audio file exceeds the download limit."
 # Some provider links wrap another URL. Without the generic extractor, yt-dlp
@@ -100,13 +102,23 @@ class _DownloadTooLarge(yt_dlp.utils.DownloadCancelled, MediaError):
 class _DownloaderLogger:
     """Keep yt-dlp output in the redacted log instead of writing to stderr."""
 
+    def __init__(self) -> None:
+        self._warnings: list[str] = []
+
     def debug(self, _message: str) -> None:
         pass
 
     def warning(self, message: str) -> None:
+        # Browser-cookie warnings can include private paths, so keep only YouTube's.
+        if message.startswith("[youtube") and message not in self._warnings:
+            self._warnings.append(message)
         log.debug("yt-dlp: %s", message)
 
     def error(self, message: str) -> None:
+        # These say why an attempt failed, but also accompany successful ones.
+        for warning in self._warnings:
+            log.warning("yt-dlp: %.200s", warning.partition("\n")[0])
+        self._warnings.clear()
         log.warning("yt-dlp: %s", message)
 
 
@@ -337,6 +349,7 @@ class MediaResolver:
         self._youtube_status_task: asyncio.Task[dict[str, Any]] | None = None
         self._youtube_status_cache: tuple[float, dict[str, Any]] | None = None
         self._on_youtube_status = on_youtube_status
+        self._more_account_clients = False
 
     @property
     def youtube_auth_configured(self) -> bool:
@@ -421,7 +434,7 @@ class MediaResolver:
                     with Path(self.settings.cookies_file).open("rb"):
                         pass
                 log.info("Using configured YouTube cookies.")
-                return operation(True, age_restricted)
+                return self._with_account_clients(lambda: operation(True, age_restricted))
             except yt_dlp.utils.DownloadCancelled:
                 raise
             except (
@@ -452,6 +465,9 @@ class MediaResolver:
                 raise _YouTubeAgeRestricted from error
             if self._youtube_account_failure(error):
                 raise self._youtube_account_error() from error
+            if cookie_error is not None and self._youtube_format_failure(cookie_error):
+                # The account worked, so a guest bot check would be misleading.
+                raise self._youtube_format_error() from error
             if self._youtube_bot_failure(error) or (
                 cookie_error is not None and self._youtube_bot_failure(cookie_error)
             ):
@@ -459,6 +475,41 @@ class MediaResolver:
             if cookie_error is not None:
                 raise _YouTubeCookieRetryFailed from error
             raise
+
+    def _with_account_clients[T](self, operation: Callable[[], T]) -> T:
+        """Retry once when yt-dlp's default clients give this account no audio."""
+        if self._more_account_clients:
+            return operation()
+        try:
+            return operation()
+        except yt_dlp.utils.YoutubeDLError as error:
+            if not self._youtube_format_failure(error):
+                raise
+        log.info("YouTube gave the account no audio; trying more of its clients.")
+        self._more_account_clients = True
+        try:
+            return operation()
+        except BaseException:
+            self._more_account_clients = False
+            raise
+
+    @staticmethod
+    def _youtube_format_failure(error: Exception) -> bool:
+        return any(
+            phrase in str(error).casefold()
+            for phrase in (
+                "requested format is not available",
+                "no video formats found",
+                "drm protected",
+            )
+        )
+
+    @staticmethod
+    def _youtube_format_error() -> MediaError:
+        return MediaError(
+            "YouTube gave the bot's account no playable audio for this video. "
+            "Try another link or try again later."
+        )
 
     @staticmethod
     def _youtube_account_failure(error: Exception) -> bool:
@@ -674,10 +725,14 @@ class MediaResolver:
         }
         if self.settings.deno:
             options["js_runtimes"] = {"deno": {"path": self.settings.deno}}
+        youtube: dict[str, list[str]] = {}
         if self.settings.po_token:
-            options["extractor_args"] = {
-                "youtube": {"po_token": [f"web+{self.settings.po_token}"], "player_client": ["web"]}
-            }
+            # YouTube gives the web client no audio URLs, so keep the other clients.
+            youtube["po_token"] = [f"web+{self.settings.po_token}"]
+        if use_cookies and self._more_account_clients:
+            youtube["player_client"] = list(ACCOUNT_CLIENTS)
+        if youtube:
+            options["extractor_args"] = {"youtube": youtube}
         if use_cookies and self.settings.cookies_browser:
             browser, _, profile = self.settings.cookies_browser.partition(":")
             options["cookiesfrombrowser"] = (browser, profile or None, None, None)
@@ -966,7 +1021,7 @@ class MediaResolver:
             def retrieve(output: Path, cached: dict[str, Any] | None = None) -> Path:
                 with self._downloader(
                     use_cookies=use_cookies,
-                    format="bestaudio/best",
+                    format="bestaudio/best[height<=480]/best",
                     outtmpl=str(output / "source.%(ext)s"),
                     max_filesize=self.settings.max_download_bytes,
                     match_filter=_reject_live,
