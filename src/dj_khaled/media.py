@@ -71,6 +71,10 @@ class _YouTubeAgeRestricted(Exception):
     """An explicit age gate needs account credentials or account verification."""
 
 
+class _YouTubeBotCheck(Exception):
+    """YouTube bot verification blocked playback after the available attempts."""
+
+
 class _YouTubeCookieRetryFailed(Exception):
     """Neither the configured YouTube session nor guest access succeeded."""
 
@@ -372,6 +376,10 @@ class MediaResolver:
                 raise _YouTubeAgeRestricted from error
             if self._youtube_account_failure(error):
                 raise self._youtube_account_error() from error
+            if self._youtube_bot_failure(error) or (
+                cookie_error is not None and self._youtube_bot_failure(cookie_error)
+            ):
+                raise _YouTubeBotCheck from error
             if cookie_error is not None:
                 raise _YouTubeCookieRetryFailed from error
             raise
@@ -419,6 +427,13 @@ class MediaResolver:
         return MediaError(
             "This video is age-restricted (18+) and requires a signed-in, age-verified "
             f"YouTube account. YouTube sign-in: {label}."
+        )
+
+    @staticmethod
+    def _youtube_bot_error() -> MediaError:
+        return MediaError(
+            "YouTube blocked playback with a bot check. "
+            "Refresh the bot's YouTube cookies or try again later."
         )
 
     def _youtube_cookie_error(self) -> MediaError:
@@ -609,6 +624,8 @@ class MediaResolver:
             )
         except _YouTubeAgeRestricted as error:
             raise self._youtube_auth_error() from error
+        except _YouTubeBotCheck as error:
+            raise self._youtube_bot_error() from error
         except _YouTubeCookieRetryFailed as error:
             raise self._youtube_cookie_error() from error
         except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as error:
@@ -904,6 +921,8 @@ class MediaResolver:
         except _YouTubeAgeRestricted as error:
             track.age_restricted = True
             raise self._youtube_auth_error() from error
+        except _YouTubeBotCheck as error:
+            raise self._youtube_bot_error() from error
         except _YouTubeCookieRetryFailed as error:
             raise self._youtube_cookie_error() from error
         except (
