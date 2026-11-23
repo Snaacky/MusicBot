@@ -38,6 +38,7 @@ jobs:
       - name: Build Python image
         run: >-
           docker build --pull --tag "$IMAGE"
+          --build-arg "BUILD_REVISION=${GITHUB_SHA}"
           --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}"
           --label "org.opencontainers.image.revision=${GITHUB_SHA}"
           --label "org.opencontainers.image.licenses=MIT" .

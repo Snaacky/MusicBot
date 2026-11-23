@@ -55,8 +55,8 @@ def check_status(options: dict[str, Any]) -> dict[str, Any]:
         "configured": configured,
         "logged_in": False,
         "status": "logged_out",
-        "message": "Guest playback is available. "
-        "Account cookies can be used for bot-check retries and age-restricted (18+) videos.",
+        "message": "YouTube cookies are not configured. Regular videos use guest playback; "
+        "age-restricted and account-only videos require a signed-in session.",
     }
     if not configured:
         return result

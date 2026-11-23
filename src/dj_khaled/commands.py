@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
 
+from . import __version__
 from .activity import added_tracks, user_action
 from .models import UserError, duration_text
 from .seek import parse_position
@@ -131,6 +134,11 @@ def register_commands(bot: DJKhaled) -> None:
 
         embed = discord.Embed(title=bot.settings.app_name, color=0xF4B942)
         embed.description = "Play music in your voice channel, build a queue, and control it below."
+        revision = os.environ.get("DJ_KHALED_BUILD_REVISION", "").strip()
+        build = revision[:7].lower() if re.fullmatch(r"[0-9a-fA-F]{7,64}", revision) else "unknown"
+        embed.add_field(
+            name="DJ Khaled version", value=f"v{__version__} · build {build}", inline=False
+        )
         embed.add_field(
             name=text("commands.help.commands_title"),
             value="/play · /search · /nowplaying · /seek · /help",
@@ -159,8 +167,9 @@ def register_commands(bot: DJKhaled) -> None:
         )
         embed.add_field(
             name="YouTube playback",
-            value="Regular tracks try guest playback first. Configured YouTube cookies are "
-            "retried for bot checks and age-restricted (18+) videos.",
+            value="Configured YouTube cookies are tried first for videos, searches and playlists. "
+            "Guest playback is a fallback when cookies are unavailable or rejected. "
+            "Age-restricted and account-only videos still require a valid sign-in.",
             inline=False,
         )
         embed.add_field(

@@ -26,5 +26,7 @@ RUN uv sync --frozen --no-dev --no-editable --no-cache \
     && mkdir -p /config/data
 
 VOLUME ["/config"]
+ARG BUILD_REVISION
+ENV DJ_KHALED_BUILD_REVISION=${BUILD_REVISION}
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/app/.venv/bin/dj-khaled"]

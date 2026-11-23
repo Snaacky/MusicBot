@@ -32,6 +32,7 @@ from .config import Settings
 from .models import MediaError, Track, finite_seconds
 from .spotify_auth import SpotifyUserAuth
 from .tidal import TidalService, tidal_link
+from .youtube_auth import _cookie_snapshot
 from .youtube_auth import check_status as check_youtube_status
 
 log = logging.getLogger(__name__)
@@ -71,11 +72,7 @@ class _YouTubeAgeRestricted(Exception):
 
 
 class _YouTubeCookieRetryFailed(Exception):
-    """Configured account cookies could not complete a YouTube bot check."""
-
-
-class _YouTubeCookieRequired(Exception):
-    """Cached metadata was obtained using an authenticated YouTube session."""
+    """Neither the configured YouTube session nor guest access succeeded."""
 
 
 class _SpotifyUnauthorized(Exception):
@@ -303,7 +300,7 @@ class MediaResolver:
         if logged_in is True:
             return "Signed in"
         if logged_in is False:
-            return "Signed out - ordinary tracks still play as guests"
+            return "Signed out - YouTube did not accept the configured cookies"
         return "Could not verify sign-in"
 
     @staticmethod
@@ -326,52 +323,80 @@ class MediaResolver:
 
     @staticmethod
     def _youtube_bot_failure(error: Exception) -> bool:
-        if isinstance(error, _YouTubeCookieRequired):
-            return True
         return any(
             phrase in str(error).casefold()
             for phrase in ("not a bot", "unusual traffic", "automated queries")
         )
 
     def _with_youtube_cookies[T](
-        self, operation: Callable[[bool, bool], T], *, youtube: bool, allow_age_retry: bool = True
+        self, operation: Callable[[bool, bool], T], *, youtube: bool, age_restricted: bool = False
     ) -> T:
-        """Try guests first, then configured cookies for a bot check or age gate."""
+        """Prefer the configured account; fall back once for ordinary guest access."""
+        if not youtube:
+            return operation(False, False)
+        cookie_error: Exception | None = None
+        if self.youtube_auth_configured:
+            try:
+                if not self.settings.cookies_browser and self.settings.cookies_file:
+                    with Path(self.settings.cookies_file).open("rb"):
+                        pass
+                log.info("Using configured YouTube cookies.")
+                return operation(True, age_restricted)
+            except yt_dlp.utils.DownloadCancelled:
+                raise
+            except (
+                yt_dlp.utils.YoutubeDLError,
+                _YouTubeAgeRestricted,
+                OSError,
+                ValueError,
+            ) as error:
+                if age_restricted or self._youtube_age_failure(error):
+                    raise _YouTubeAgeRestricted from error
+                if self._youtube_account_failure(error):
+                    raise self._youtube_account_error() from error
+                cookie_error = error
+                log.info("YouTube cookie access failed; falling back to guest access.")
+        elif age_restricted:
+            raise _YouTubeAgeRestricted
         try:
             return operation(False, False)
         except yt_dlp.utils.DownloadCancelled:
             raise
         except (
-            yt_dlp.utils.DownloadError,
-            yt_dlp.utils.ExtractorError,
-            yt_dlp.utils.ReExtractInfo,
+            yt_dlp.utils.YoutubeDLError,
             _YouTubeAgeRestricted,
-            _YouTubeCookieRequired,
+            OSError,
+            ValueError,
         ) as error:
-            age_restricted = self._youtube_age_failure(error)
-            if not youtube or not (age_restricted or self._youtube_bot_failure(error)):
-                raise
-            if age_restricted and not allow_age_retry:
+            if self._youtube_age_failure(error):
                 raise _YouTubeAgeRestricted from error
-            if not self.youtube_auth_configured:
-                if age_restricted:
-                    raise _YouTubeAgeRestricted from error
-                raise
-            failure = _YouTubeAgeRestricted if age_restricted else _YouTubeCookieRetryFailed
-            if not self.settings.cookies_browser and self.settings.cookies_file:
-                try:
-                    with Path(self.settings.cookies_file).open("rb"):
-                        pass
-                except OSError, ValueError:
-                    raise failure from error
-            try:
-                return operation(True, age_restricted)
-            except yt_dlp.utils.DownloadCancelled:
-                raise
-            except (yt_dlp.utils.YoutubeDLError, OSError, ValueError) as auth_error:
-                if self._youtube_age_failure(auth_error):
-                    raise _YouTubeAgeRestricted from auth_error
-                raise failure from auth_error
+            if self._youtube_account_failure(error):
+                raise self._youtube_account_error() from error
+            if cookie_error is not None:
+                raise _YouTubeCookieRetryFailed from error
+            raise
+
+    @staticmethod
+    def _youtube_account_failure(error: Exception) -> bool:
+        return any(
+            phrase in str(error).casefold()
+            for phrase in (
+                "private video",
+                "video is private",
+                "members-only",
+                "members only",
+                "join this channel",
+                "login required",
+                "sign in to view",
+            )
+        )
+
+    @staticmethod
+    def _youtube_account_error() -> MediaError:
+        return MediaError(
+            "This video requires YouTube account access. Check that the configured "
+            "account is signed in and can play this video."
+        )
 
     @staticmethod
     def _youtube_auth_failure(error: Exception) -> bool:
@@ -398,7 +423,7 @@ class MediaResolver:
 
     def _youtube_cookie_error(self) -> MediaError:
         return MediaError(
-            "YouTube's bot check could not be completed with the configured cookies. "
+            "YouTube could not play this video using the configured cookies or guest access. "
             f"YouTube sign-in: {self.youtube_status_label()}. Check the cookies and try again."
         )
 
@@ -553,6 +578,8 @@ class MediaResolver:
     @contextmanager
     def _downloader(self, *, use_cookies: bool, **extra: Any) -> Iterator[yt_dlp.YoutubeDL]:
         options = self.options(use_cookies=use_cookies, **extra)
+        if options.get("cookiefile"):
+            options["cookiefile"] = _cookie_snapshot(options["cookiefile"])
         with yt_dlp.YoutubeDL(options) as downloader:
             if options.get("cookiefile"):
                 try:
@@ -578,10 +605,6 @@ class MediaResolver:
                 lambda: self._with_youtube_cookies(
                     retrieve,
                     youtube=youtube,
-                    allow_age_retry=(
-                        _youtube_video_id(query) is not None
-                        and options.get("noplaylist", True) is True
-                    ),
                 )
             )
         except _YouTubeAgeRestricted as error:
@@ -825,21 +848,16 @@ class MediaResolver:
                         raise MediaError("The provider did not finish downloading the audio.")
                     return result
 
-            if use_cookies:
-                # Authenticated retries must not reuse a guest .part file.
-                output = Path(tempfile.mkdtemp(prefix="authenticated-", dir=directory)).resolve()
-                if not output.is_relative_to(directory.resolve()):
-                    raise MediaError("The audio download directory is unavailable.")
-                return retrieve(output)
-
             cached = self._cached_extraction(query)
             if cached is not None:
                 identity, info = cached
                 if finite_seconds(info.get("age_limit")) >= 18:
                     track.age_restricted = True
-                    raise _YouTubeAgeRestricted
-                if info.pop("_dj_khaled_requires_cookies", False):
-                    raise _YouTubeCookieRequired
+                    if not use_cookies:
+                        raise _YouTubeAgeRestricted
+                if bool(info.pop("_dj_khaled_requires_cookies", False)) != use_cookies:
+                    cached = None
+            if cached is not None:
                 # An isolated attempt prevents stale .part files or a completed
                 # stale attempt being mistaken for the fresh fallback's output.
                 attempt = Path(tempfile.mkdtemp(prefix="cached-", dir=directory)).resolve()
@@ -868,11 +886,20 @@ class MediaResolver:
                 finally:
                     if not succeeded:
                         shutil.rmtree(attempt, ignore_errors=True)
-            return retrieve(directory)
+            # Account and guest attempts cannot share partial downloads.
+            prefix = "authenticated-" if use_cookies else "guest-"
+            output = Path(tempfile.mkdtemp(prefix=prefix, dir=directory)).resolve()
+            if not output.is_relative_to(directory.resolve()):
+                raise MediaError("The audio download directory is unavailable.")
+            return retrieve(output)
 
         try:
             return await self._run_native(
-                lambda: self._with_youtube_cookies(run, youtube=track.platform == "youtube")
+                lambda: self._with_youtube_cookies(
+                    run,
+                    youtube=track.platform == "youtube",
+                    age_restricted=track.age_restricted,
+                )
             )
         except _YouTubeAgeRestricted as error:
             track.age_restricted = True
