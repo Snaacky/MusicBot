@@ -23,7 +23,7 @@ from . import __version__
 from .bot import DJKhaled
 from .config import Settings
 from .instance import InstanceLock, legacy_process
-from .media import MediaResolver, PublicResolver
+from .media import MediaResolver, public_connector
 from .models import UserError
 from .spotify_auth import login as spotify_login
 from .tidal_auth import login as tidal_login
@@ -33,15 +33,21 @@ class RedactingFormatter(logging.Formatter):
     def __init__(self, settings: Settings) -> None:
         super().__init__("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
         self.secrets = tuple(
-            value
-            for value in (
-                settings.token,
-                settings.spotify_secret,
-                settings.genius_token,
-                settings.po_token,
-                settings.proxy,
+            sorted(
+                {
+                    value
+                    for value in (
+                        settings.token,
+                        settings.spotify_secret,
+                        settings.genius_token,
+                        settings.po_token,
+                        settings.proxy,
+                    )
+                    if value
+                },
+                key=len,
+                reverse=True,
             )
-            if value
         )
 
     def format(self, record: logging.LogRecord) -> str:
@@ -159,7 +165,7 @@ def validate(settings: Settings, *, require_token: bool) -> dict[str, str]:
 
 async def probe(settings: Settings, query: str) -> None:
     async with aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(resolver=PublicResolver()),
+        connector=public_connector(),
         timeout=aiohttp.ClientTimeout(total=60),
     ) as session:
         resolver = MediaResolver(settings, session, read_only=True)

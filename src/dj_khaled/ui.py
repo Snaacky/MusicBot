@@ -489,8 +489,8 @@ class Controls(SafeView):
                 await self.bot.publish_component(self.player, interaction, guard=guard)
                 return
             if action == "lyrics":
-                lyrics = self.player.current_lyrics
                 track = self.player.current
+                lyrics = self.player.current_lyrics
                 if not lyrics or not track:
                     raise UserError("Lyrics are not available for this track yet.")
                 view = LyricsView(self.bot, track, lyrics, interaction.user.id)
@@ -502,12 +502,15 @@ class Controls(SafeView):
             await interaction.response.defer(thinking=False)
             self.bot.authorize(interaction, self.player, control=True)
             remember_control(self.bot, self.player, interaction)
+
+            def guard() -> None:
+                self.bot.authorize(interaction, self.player, control=True)
+
             if action == "previous":
-                track = await self.player.previous()
+                track = await self.player.previous(guard=guard)
                 message = track_action(interaction.user, "went back to", track)
             elif action == "pause":
-                enabled = "manual" not in self.player.pause_reasons
-                track = await self.player.pause("manual", enabled)
+                track, enabled, paused = await self.player.toggle_pause(guard=guard)
                 message = (
                     track_action(interaction.user, "paused", track)
                     if enabled
@@ -515,37 +518,31 @@ class Controls(SafeView):
                         user_action(
                             interaction.user, "cleared the manual pause; waiting for voice."
                         )
-                        if self.player.paused
+                        if paused
                         else track_action(interaction.user, "resumed", track)
                     )
                 )
             elif action == "skip":
-                track = await self.player.skip()
+                track = await self.player.skip(guard=guard)
                 message = track_action(interaction.user, "skipped", track)
             elif action in {"disconnect", "stop"}:
                 await self.bot.remove_player(
                     self.player,
-                    guard=lambda: self.bot.authorize(interaction, self.player, control=True),
+                    guard=guard,
                     notice=user_action(interaction.user, "disconnected the bot. Queue cleared."),
                 )
                 # Removal records its notice before rendering the ended card.
                 return
             elif action == "shuffle":
-                await self.player.toggle_shuffle()
+                enabled = await self.player.toggle_shuffle(guard=guard)
                 message = user_action(
-                    interaction.user,
-                    "enabled shuffle." if self.player.shuffle else "disabled shuffle.",
+                    interaction.user, "enabled shuffle." if enabled else "disabled shuffle."
                 )
             elif action == "loop":
-                modes = list(LoopMode)
-                await self.player.set_loop(
-                    modes[(modes.index(self.player.loop_mode) + 1) % len(modes)]
-                )
-                message = user_action(
-                    interaction.user, "set repeat to " + self.player.loop_mode.value + "."
-                )
+                mode = await self.player.cycle_loop(guard=guard)
+                message = user_action(interaction.user, "set repeat to " + mode.value + ".")
             else:
-                await self.player.set_autoplay(None)
+                await self.player.set_autoplay(None, guard=guard)
                 message = user_action(interaction.user, "disabled autoplay.")
             self.player.note(message)
 
@@ -577,7 +574,11 @@ class SeekModal(discord.ui.Modal):
         await interaction.response.defer(thinking=False)
         self.bot.authorize(interaction, self.player, control=True)
         remember_control(self.bot, self.player, interaction)
-        track = await self.player.seek(position, expected_track=self.track)
+        track = await self.player.seek(
+            position,
+            expected_track=self.track,
+            guard=lambda: self.bot.authorize(interaction, self.player, control=True),
+        )
         self.player.note(
             user_action(
                 interaction.user,
@@ -610,7 +611,9 @@ class VolumeModal(discord.ui.Modal):
         await interaction.response.defer(thinking=False)
         self.bot.authorize(interaction, self.player, control=True)
         remember_control(self.bot, self.player, interaction)
-        await self.player.set_volume(volume)
+        await self.player.set_volume(
+            volume, guard=lambda: self.bot.authorize(interaction, self.player, control=True)
+        )
         self.player.note(user_action(interaction.user, f"set volume to {volume}%."))
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
@@ -640,7 +643,9 @@ class GenreView(SafeView):
             await interaction.response.defer(thinking=False)
             try:
                 self.bot.authorize(interaction, player, control=True)
-                await player.set_autoplay(genre)
+                await player.set_autoplay(
+                    genre, guard=lambda: self.bot.authorize(interaction, player, control=True)
+                )
             except Exception:
                 try:
                     await interaction.edit_original_response(view=None)

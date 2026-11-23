@@ -249,9 +249,9 @@ def _model_track(item: Any) -> Track | None:
 
 
 class TidalService:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, read_only: bool = False) -> None:
         self.settings = settings
-        self.auth = TidalUserAuth(settings)
+        self.auth = TidalUserAuth(settings, read_only=read_only)
 
     def _run[T](self, operation: Callable[[Any], T], message: str) -> T:
         try:
@@ -397,11 +397,15 @@ class TidalService:
                     "This TIDAL audio codec is unsupported. Set TIDAL_QUALITY=HIGH and retry."
                 )
             urls = data.get("urls")
-            if not isinstance(urls, list) or not 1 <= len(urls) <= 16:
+            if not isinstance(urls, list) or not urls:
                 raise MediaError("TIDAL returned an invalid audio manifest.")
+            if len(urls) > 1:
+                # Playing only the first part would silently cut the song short.
+                raise MediaError(
+                    "This TIDAL stream is split into parts. Set TIDAL_QUALITY=HIGH and retry."
+                )
             try:
-                for url in urls:
-                    _public_https(url)
+                _public_https(urls[0])
                 manifest = stream.get_stream_manifest()
                 selected = manifest.get_urls()
                 if selected != urls:

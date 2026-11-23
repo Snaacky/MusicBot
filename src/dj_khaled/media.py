@@ -27,10 +27,12 @@ import aiohttp
 import yt_dlp
 from aiohttp.resolver import DefaultResolver
 from bs4 import BeautifulSoup, SoupStrainer
+from yarl import URL
 
 from .config import Settings
 from .models import MediaError, Track, finite_seconds
 from .spotify_auth import SpotifyUserAuth
+from .spotify_auth import _access_data as spotify_access_data
 from .tidal import TidalService, tidal_link
 from .youtube_auth import _cookie_snapshot
 from .youtube_auth import check_status as check_youtube_status
@@ -40,6 +42,15 @@ RESOLUTION_CACHE_SECONDS = 120.0
 RESOLUTION_CACHE_ENTRIES = 128
 EXTRACTION_CACHE_SECONDS = 60.0
 EXTRACTION_CACHE_ENTRIES = 16
+# Look past leading live streams when a text query only needs one song.
+SEARCH_CANDIDATES = 5
+LIVE_STREAM_ERROR = "Live streams are not supported. Choose a regular song or video."
+DOWNLOAD_LIMIT_ERROR = "The audio file exceeds the download limit."
+# Some provider links wrap another URL. Without the generic extractor, yt-dlp
+# cannot follow one to an arbitrary or private address.
+ALLOWED_EXTRACTORS = ("youtube.*", "soundcloud(:.*)?")
+SOUNDCLOUD_HOSTS = frozenset({"soundcloud.com", "www.soundcloud.com", "m.soundcloud.com"})
+SOUNDCLOUD_SHORT_HOSTS = frozenset({"on.soundcloud.com", "soundcloud.app.goo.gl"})
 _sanitize_download_info = yt_dlp.YoutubeDL.sanitize_info
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus", ".webm", ".mp4"}
 MUSIC_BLOCKLIST = (
@@ -79,6 +90,26 @@ class _YouTubeCookieRetryFailed(Exception):
     """Neither the configured YouTube session nor guest access succeeded."""
 
 
+class _DownloadTooLarge(yt_dlp.utils.DownloadCancelled, MediaError):
+    """Stop yt-dlp like a cancellation while keeping a message for the user."""
+
+    def __init__(self) -> None:
+        super().__init__(DOWNLOAD_LIMIT_ERROR)
+
+
+class _DownloaderLogger:
+    """Keep yt-dlp output in the redacted log instead of writing to stderr."""
+
+    def debug(self, _message: str) -> None:
+        pass
+
+    def warning(self, message: str) -> None:
+        log.debug("yt-dlp: %s", message)
+
+    def error(self, message: str) -> None:
+        log.warning("yt-dlp: %s", message)
+
+
 class _SpotifyUnauthorized(Exception):
     def __init__(self, *, user_required: bool = False) -> None:
         self.user_required = user_required
@@ -109,17 +140,49 @@ def _parse_url(value: str) -> ParseResult:
 
 def public_http_url(value: str) -> str:
     parsed = _parse_url(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
         raise MediaError("Use a public HTTP or HTTPS music link.")
     try:
-        address = ipaddress.ip_address(parsed.hostname)
+        # aiohttp connects to this normalized host. It maps Unicode digits and
+        # dots to ASCII, so checking the original spelling is not enough.
+        host = (URL(value).raw_host or "").rstrip(".").casefold()
+    except ValueError as error:
+        raise MediaError("Use a valid public HTTP or HTTPS music link.") from error
+    try:
+        address = ipaddress.ip_address(host)
     except ValueError:
         address = None
-    if address is not None and not address.is_global:
+    if address is not None:
+        private = not address.is_global
+    else:
+        # No public domain ends in a number; these are legacy IPv4 spellings.
+        private = re.fullmatch(r"[0-9]+|0x[0-9a-f]*", host.rpartition(".")[2]) is not None
+    if private:
         raise MediaError("Links to private or local network addresses are not supported.")
-    if parsed.hostname.casefold() == "localhost":
+    if not host or host == "localhost" or host.endswith(".localhost"):
         raise MediaError("Links to localhost are not supported.")
     return value
+
+
+def _public_socket(address_info: tuple[Any, ...]) -> socket.socket:
+    """Check the address really being dialled, including literals which skip DNS."""
+    family, kind, protocol, _name, address = address_info
+    try:
+        public = ipaddress.ip_address(address[0]).is_global
+    except ValueError:
+        public = False
+    if not public:
+        raise OSError("The destination is a non-public network address.")
+    return socket.socket(family=family, type=kind, proto=protocol)
+
+
+def public_connector(**options: Any) -> aiohttp.TCPConnector:
+    return aiohttp.TCPConnector(resolver=PublicResolver(), socket_factory=_public_socket, **options)
 
 
 class PublicResolver(DefaultResolver):
@@ -222,6 +285,17 @@ def _youtube_video_id(url: str) -> str | None:
         return None
 
 
+def _is_live(info: dict[str, Any]) -> bool:
+    return bool(info.get("is_live")) or info.get("live_status") in ("is_live", "is_upcoming")
+
+
+def _reject_live(info: dict[str, Any], *, incomplete: bool = False) -> None:
+    # yt-dlp hands live streams to FFmpeg, which never reports progress. Neither
+    # cancellation nor the size limit could stop one once it started.
+    if _is_live(info):
+        raise MediaError(LIVE_STREAM_ERROR)
+
+
 def is_music(track: Track) -> bool:
     return 30 <= track.duration <= 600 and not any(
         word in track.title.casefold() for word in MUSIC_BLOCKLIST
@@ -241,7 +315,9 @@ class MediaResolver:
         self.http = session
         self._read_only = read_only
         self._workers = asyncio.Semaphore(2)
+        self._parse_workers = asyncio.Semaphore(4)
         self._native_tasks: dict[asyncio.Task[Any], asyncio.Event] = {}
+        self._close_task: asyncio.Task[None] | None = None
         self._resolution_cache: OrderedDict[tuple[str, bool], tuple[float, tuple[Track, ...]]] = (
             OrderedDict()
         )
@@ -255,8 +331,8 @@ class MediaResolver:
         self._spotify_lock = asyncio.Lock()
         self._spotify_token = ""
         self._spotify_expiry = 0.0
-        self.spotify_user = SpotifyUserAuth(settings, session)
-        self.tidal = TidalService(settings)
+        self.spotify_user = SpotifyUserAuth(settings, session, read_only=read_only)
+        self.tidal = TidalService(settings, read_only=read_only)
         self._spotify_public_workers = asyncio.Semaphore(4)
         self._youtube_status_task: asyncio.Task[dict[str, Any]] | None = None
         self._youtube_status_cache: tuple[float, dict[str, Any]] | None = None
@@ -452,13 +528,15 @@ class MediaResolver:
         # original native check is still running.
         return dict(await asyncio.shield(self._start_youtube_status_check()))
 
-    async def _run_native[T](self, operation: Callable[[], T]) -> T:
+    async def _run_native[T](
+        self, operation: Callable[[], T], *, workers: asyncio.Semaphore | None = None
+    ) -> T:
         if self._closed:
             raise MediaError("The media service is shutting down.")
         started = asyncio.Event()
 
         async def work() -> T:
-            async with self._workers:
+            async with workers or self._workers:
                 started.set()
                 return await asyncio.to_thread(operation)
 
@@ -482,6 +560,21 @@ class MediaResolver:
 
     async def close(self) -> None:
         self._closed = True
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._finish_close(), name="media-close")
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(self._close_task)
+                break
+            except asyncio.CancelledError:
+                if self._close_task.cancelled():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _finish_close(self) -> None:
         if self._youtube_status_task is not None:
             self._youtube_status_task.cancel()
             await asyncio.gather(self._youtube_status_task, return_exceptions=True)
@@ -570,6 +663,10 @@ class MediaResolver:
             "retries": 2,
             "fragment_retries": 2,
             "extractor_retries": 1,
+            "allowed_extractors": list(ALLOWED_EXTRACTORS),
+            "hls_prefer_native": True,
+            "logger": _DownloaderLogger(),
+            "color": "never",
             "ffmpeg_location": self.settings.ffmpeg,
             "cachedir": False
             if self._read_only
@@ -655,7 +752,11 @@ class MediaResolver:
 
     async def search(self, query: str, limit: int = 9) -> list[Track]:
         info = await self.extract(f"ytsearch{min(limit, 20)}:{query}", extract_flat="in_playlist")
-        return [self.track(entry, "youtube") for entry in info.get("entries", []) if entry]
+        return [
+            self.track(entry, "youtube")
+            for entry in info.get("entries", [])
+            if entry and not _is_live(entry)
+        ]
 
     async def resolve(self, query: str, allow_playlist: bool = False) -> list[Track]:
         query = query.strip()
@@ -705,9 +806,11 @@ class MediaResolver:
         if platform == "direct":
             return [await self.direct_info(query)]
         if _parse_url(query).scheme not in {"http", "https"}:
-            return await self.search(query, 1)
+            return (await self.search(query, SEARCH_CANDIDATES))[:1]
         if platform == "youtube":
             query = normalize_youtube(query, allow_playlist)
+        elif _parse_url(query).hostname in SOUNDCLOUD_SHORT_HOSTS:
+            query = await self._expand_soundcloud(query)
         playlist = allow_playlist or (platform == "soundcloud" and "/sets/" in query)
         info = await self.extract(
             query,
@@ -717,12 +820,35 @@ class MediaResolver:
         )
         entries = info.get("entries")
         if entries is not None:
-            return [self.track(entry, platform) for entry in entries if entry][
-                : self.settings.max_playlist
-            ]
+            return [
+                self.track(entry, platform) for entry in entries if entry and not _is_live(entry)
+            ][: self.settings.max_playlist]
+        if _is_live(info):
+            raise MediaError(LIVE_STREAM_ERROR)
         track = self.track(info, platform, query)
         track.start_seconds = start_offset(query)
         return [track] if info else []
+
+    async def _expand_soundcloud(self, url: str) -> str:
+        """Follow a share link only until it names a SoundCloud page."""
+        failure = "That SoundCloud short link could not be opened. Try its full link."
+        try:
+            async with asyncio.timeout(20):
+                for _ in range(6):
+                    response = await self.http.request(
+                        "GET", public_http_url(url), allow_redirects=False
+                    )
+                    location = response.headers.get("Location")
+                    redirected = response.status in {301, 302, 303, 307, 308}
+                    response.release()
+                    if not redirected or not location:
+                        break
+                    url = urljoin(url, location)
+                    if _parse_url(public_http_url(url)).hostname in SOUNDCLOUD_HOSTS:
+                        return url
+        except (aiohttp.ClientError, TimeoutError, ValueError) as error:
+            raise MediaError(failure) from error
+        raise MediaError(failure)
 
     async def _public_response(
         self, method: str, url: str, *, headers: dict[str, str] | None = None
@@ -827,7 +953,7 @@ class MediaResolver:
                 if cancel.is_set():
                     raise yt_dlp.utils.DownloadCancelled("Playback request cancelled")
                 if (status.get("downloaded_bytes") or 0) > self.settings.max_download_bytes:
-                    raise yt_dlp.utils.DownloadCancelled("Audio exceeds the download limit")
+                    raise _DownloadTooLarge
 
             if cancel.is_set():
                 raise MediaError("Playback request cancelled.")
@@ -843,6 +969,7 @@ class MediaResolver:
                     format="bestaudio/best",
                     outtmpl=str(output / "source.%(ext)s"),
                     max_filesize=self.settings.max_download_bytes,
+                    match_filter=_reject_live,
                     progress_hooks=[progress],
                 ) as downloader:
                     info = (
@@ -862,6 +989,10 @@ class MediaResolver:
                     filename = downloads[0].get("filepath") or downloader.prepare_filename(info)
                     result = Path(filename).resolve()
                     if not result.is_relative_to(output.resolve()) or not result.is_file():
+                        # yt-dlp skips a known oversized file without raising.
+                        size = info.get("filesize") or info.get("filesize_approx")
+                        if finite_seconds(size) > self.settings.max_download_bytes:
+                            raise _DownloadTooLarge
                         raise MediaError("The provider did not finish downloading the audio.")
                     return result
 
@@ -956,7 +1087,7 @@ class MediaResolver:
                         raise MediaError("Playback request cancelled.")
                     count += len(chunk)
                     if count > self.settings.max_download_bytes:
-                        raise MediaError("The audio file exceeds the download limit.")
+                        raise MediaError(DOWNLOAD_LIMIT_ERROR)
                     pending.extend(chunk)
                     if len(pending) >= 1024 * 1024:
                         await self._write_direct_batch(target, bytes(pending), append=written)
@@ -1155,7 +1286,7 @@ class MediaResolver:
                                         and message.strip().casefold()
                                         == "valid user authentication required"
                                     )
-                                except ValueError:
+                                except ValueError, RecursionError:
                                     pass
                             raise _SpotifyUnauthorized(user_required=user_required)
                         if response.status == 404:
@@ -1175,7 +1306,7 @@ class MediaResolver:
                                 )
                         try:
                             result = json.loads(body)
-                        except ValueError as error:
+                        except (ValueError, RecursionError) as error:
                             raise MediaError("Spotify returned an invalid response.") from error
                         if not isinstance(result, dict):
                             raise MediaError("Spotify returned an invalid response.")
@@ -1209,20 +1340,9 @@ class MediaResolver:
                     raise MediaError(
                         "Spotify authentication failed. Check its credentials."
                     ) from error
-                token = data.get("access_token")
-                try:
-                    expires = float(data.get("expires_in", 0))
-                except TypeError, ValueError:
-                    expires = 0
-                if (
-                    not isinstance(token, str)
-                    or not token
-                    or not math.isfinite(expires)
-                    or expires <= 0
-                ):
-                    raise MediaError("Spotify returned invalid authentication data.")
+                token, lifetime = spotify_access_data(data)
                 self._spotify_token = token
-                self._spotify_expiry = asyncio.get_running_loop().time() + max(1, expires - 30)
+                self._spotify_expiry = asyncio.get_running_loop().time() + lifetime
             return self._spotify_token
 
     async def _spotify_api(self, endpoint: str) -> dict[str, Any]:
@@ -1328,7 +1448,9 @@ class MediaResolver:
                     raise ValueError("Invalid oEmbed title")
                 title = " ".join(title.split())
                 page = await self._spotify_public_body(canonical, 2 * 1024 * 1024)
-                metadata = await asyncio.to_thread(self._spotify_page_metadata, page)
+                metadata = await self._run_native(
+                    lambda: self._spotify_page_metadata(page), workers=self._parse_workers
+                )
                 page_title = " ".join(metadata["title"].split())
                 artist = " ".join(metadata["artist"].split())
                 if (
@@ -1499,7 +1621,7 @@ class MediaResolver:
             external_ids = data.get("external_ids")
             try:
                 duration = float(data.get("duration_ms") or 0) / 1000
-            except TypeError, ValueError:
+            except TypeError, ValueError, OverflowError:
                 duration = 0
             if not math.isfinite(duration) or duration < 0:
                 duration = 0

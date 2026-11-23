@@ -6,15 +6,26 @@ import logging
 import re
 import time
 from collections import OrderedDict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 from bs4 import BeautifulSoup
 
 log = logging.getLogger(__name__)
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+LOOKUP_TIMEOUT = 30.0
+MAX_REDIRECTS = 3
+_PROVIDER_HOSTS = {
+    "api.genius.com": frozenset({"api.genius.com"}),
+    "genius.com": frozenset({"genius.com", "www.genius.com"}),
+    "www.genius.com": frozenset({"genius.com", "www.genius.com"}),
+    "lrclib.net": frozenset({"lrclib.net"}),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,8 +94,12 @@ class LyricsService:
                 return None
 
             async def lookup() -> Lyrics | None:
-                async with self._workers:
-                    return await self._fetch(title, artist)
+                try:
+                    async with asyncio.timeout(LOOKUP_TIMEOUT):
+                        async with self._workers:
+                            return await self._fetch(title, artist)
+                except TimeoutError:
+                    return None
 
             task = asyncio.create_task(lookup())
             self._pending[key] = task
@@ -98,8 +113,8 @@ class LyricsService:
             return
         try:
             result = task.result()
-        except Exception:
-            log.debug("A lyrics lookup failed.", exc_info=True)
+        except Exception as error:
+            log.debug("A lyrics lookup failed (%s).", type(error).__name__)
             return
         if not self._closed:
             self.cache[key] = (time.monotonic() + (3600 if result else 300), result)
@@ -115,6 +130,56 @@ class LyricsService:
             if len(body) > MAX_RESPONSE_BYTES:
                 raise ValueError("The lyrics response exceeds the size limit.")
         return bytes(body)
+
+    @asynccontextmanager
+    async def _get(self, url: str, **options: Any) -> AsyncIterator[aiohttp.ClientResponse]:
+        """Follow only the provider's HTTPS redirects, including literal-IP checks."""
+        allowed_hosts = _PROVIDER_HOSTS.get(urlsplit(url).hostname or "", frozenset())
+        for redirects in range(MAX_REDIRECTS + 1):
+            address = urlsplit(url)
+            if (
+                address.scheme != "https"
+                or address.hostname not in allowed_hosts
+                or address.username is not None
+                or address.password is not None
+                or address.port not in {None, 443}
+            ):
+                raise ValueError("The lyrics provider returned an unsupported address.")
+            async with self.http.get(url, allow_redirects=False, **options) as response:
+                if response.status not in {301, 302, 303, 307, 308}:
+                    yield response
+                    return
+                location = response.headers.get("Location")
+                if not location or redirects == MAX_REDIRECTS:
+                    raise ValueError("The lyrics provider exceeded the redirect limit.")
+                target = urljoin(url, location)
+                if urlsplit(target).netloc != address.netloc:
+                    if "headers" in options:
+                        options["headers"] = {
+                            name: value
+                            for name, value in options["headers"].items()
+                            if name.casefold()
+                            not in {"authorization", "proxy-authorization", "cookie"}
+                        }
+                options.pop("params", None)
+                url = target
+
+    async def _parse_html(self, html: str) -> str:
+        """Keep the worker permit and lookup owned until its parser actually exits."""
+        task = asyncio.create_task(asyncio.to_thread(self._parse_genius, html))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not task.cancelled():
+                task.exception()
+            raise
 
     @staticmethod
     def _parse_genius(html: str) -> str:
@@ -178,7 +243,7 @@ class LyricsService:
         clean_title = self.clean(title)
         if self.genius_token:
             try:
-                async with self.http.get(
+                async with self._get(
                     "https://api.genius.com/search",
                     params={"q": f"{artist} {clean_title}"},
                     headers={"Authorization": "Bearer " + self.genius_token},
@@ -201,29 +266,34 @@ class LyricsService:
                     if score >= 0:
                         matches.append((score, str(result.get("url") or "")))
                 for _, url in sorted(matches, reverse=True)[:3]:
-                    if not url.startswith("https://genius.com/"):
+                    if not url.startswith(("https://genius.com/", "https://www.genius.com/")):
                         continue
-                    async with self.http.get(url) as response:
+                    async with self._get(url) as response:
                         response.raise_for_status()
                         html = (await self._body(response)).decode("utf-8", errors="replace")
-                    text = await asyncio.to_thread(self._parse_genius, html)
+                    text = await self._parse_html(html)
                     if text:
                         return Lyrics(text[:100000], "Genius")
-            except aiohttp.ClientError, ValueError, TypeError, AttributeError, TimeoutError:
+            except (
+                aiohttp.ClientError,
+                ValueError,
+                TypeError,
+                AttributeError,
+                TimeoutError,
+                RecursionError,
+            ):
                 pass
         for params in (
             {"track_name": clean_title, "artist_name": artist},
             {"track_name": clean_title},
         ):
             try:
-                async with self.http.get(
-                    "https://lrclib.net/api/search", params=params
-                ) as response:
+                async with self._get("https://lrclib.net/api/search", params=params) as response:
                     response.raise_for_status()
                     candidates = json.loads(await self._body(response))
                 if result := self._best_lrclib(clean_title, artist, candidates):
                     return result
-            except aiohttp.ClientError, ValueError, TimeoutError:
+            except aiohttp.ClientError, ValueError, TimeoutError, RecursionError:
                 continue
         return None
 

@@ -96,6 +96,8 @@ class AudioCache:
             if track.duration <= 0:
                 await self.media.update_metadata(track, lease.path)
             await self.prune(protect={key})
+            if self._closed:
+                raise MediaError("The audio cache is shutting down.")
             return lease
         except BaseException:
             if lease is not None:
@@ -206,14 +208,35 @@ class AudioCache:
             jobs = list(self._jobs.values())
             for job in jobs:
                 job.cancel.set()
-        if jobs:
-            await asyncio.gather(*(job.task for job in jobs), return_exceptions=True)
-        await self.prune()
+
+        async def drain() -> None:
+            if jobs:
+                await asyncio.gather(*(job.task for job in jobs), return_exceptions=True)
+            await self.prune()
+
+        # Downloads own native workers and temporary files. Cancellation of a
+        # shutdown caller must not abandon those workers or cancel their owners.
+        draining = asyncio.create_task(drain())
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(draining)
+                break
+            except asyncio.CancelledError:
+                if draining.cancelled():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def cleanup_stale(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         for path in self.directory.glob("download-*"):
             # A second process can own a fresh download; do not remove its working files.
-            if path.is_dir() and time.time() - path.stat().st_mtime > 86400:
+            try:
+                stale = path.is_dir() and time.time() - path.stat().st_mtime > 86400
+            except OSError:
+                continue
+            if stale:
                 await asyncio.to_thread(shutil.rmtree, path, True)
         await self.prune()

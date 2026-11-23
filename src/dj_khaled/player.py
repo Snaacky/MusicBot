@@ -32,6 +32,8 @@ NOTIFICATION_QUEUE_LIMIT = 8
 NOTIFICATION_INTERVAL = 1.0
 NOTIFICATION_DEDUP_SECONDS = 15.0
 NOTIFICATION_TIMEOUT = 10.0
+AUTOPLAY_FAILURE_LIMIT = 3
+AUTOPLAY_RETRY_DELAY = 5.0
 
 
 class TimedAudio(discord.PCMVolumeTransformer):
@@ -132,12 +134,16 @@ class GuildPlayer:
         self._checkpoint_task: asyncio.Task[None] | None = None
         self._checkpoint_dirty = False
         self._autoplay_search: asyncio.Task[list[Track]] | None = None
+        self._autoplay_track: Track | None = None
+        self._autoplay_failures = 0
+        self._autoplay_failed: deque[str] = deque(maxlen=20)
         self._prefetch_tasks: dict[str, asyncio.Task[None]] = {}
         self._prefetch_pending: set[asyncio.Task[None]] = set()
         self._lyrics_task: asyncio.Task[None] | None = None
         self._alone: asyncio.Task[None] | None = None
         self._idle: asyncio.Task[None] | None = None
         self._reconnect: asyncio.Task[None] | None = None
+        self._rejoin_requested = False
         self._notification_task: asyncio.Task[None] | None = None
         self._notifications: deque[str] = deque()
         self._notification_recent: dict[str, float] = {}
@@ -230,7 +236,15 @@ class GuildPlayer:
             if not accepted:
                 raise UserError("No playable tracks were found.")
             self.owner_id = self.owner_id or requester_id
-            self.queue.extend(accepted)
+            if self.shuffle:
+                for track in random.sample(accepted, len(accepted)):
+                    # Keep the head in place; it may already be downloading.
+                    size = len(self.queue)
+                    self.queue.insert(random.randint(min(1, size), size), track)
+            else:
+                self.queue.extend(accepted)
+            if self.voice is None or not self.voice.is_connected():
+                self._rejoin_requested = True
         self._cancel_autoplay_search()
         self._cancel_idle()
         self.start()
@@ -252,16 +266,21 @@ class GuildPlayer:
         voice = self.voice
         if voice and voice.is_connected():
             self.voice_channel = voice.channel
+            self._rejoin_requested = False
             return
-        await self.voice_channel.connect(
-            cls=PacedVoiceClient, timeout=30, reconnect=True, self_deaf=True
-        )
+        await self._open_voice()
+        self._rejoin_requested = False
         humans = [member for member in self.voice_channel.members if not member.bot]
         await self.listeners_changed(bool(humans))
         log.info(
             "Playback phase server=%s phase=connect elapsed_ms=%.1f",
             self.guild.id,
             (time.perf_counter() - started) * 1000,
+        )
+
+    async def _open_voice(self) -> None:
+        await self.voice_channel.connect(
+            cls=PacedVoiceClient, timeout=30, reconnect=True, self_deaf=True
         )
 
     def _connection_task(self) -> asyncio.Task[None]:
@@ -324,13 +343,9 @@ class GuildPlayer:
                 while not self.closed:
                     async with self._lock:
                         if self.current is None and self.queue:
-                            if self.shuffle and self._reason != "previous":
-                                index = random.randrange(len(self.queue))
-                                self.queue.rotate(-index)
-                                self.current = self.queue.popleft()
-                                self.queue.rotate(index)
-                            else:
-                                self.current = self.queue.popleft()
+                            # Shuffle orders the queue itself, so the head stays
+                            # the track which prefetching already prepared.
+                            self.current = self.queue.popleft()
                             self._retries = 0
                             self._offset = self.current.start_seconds
                         track = self.current
@@ -383,8 +398,8 @@ class GuildPlayer:
                                 del self.queue[index]
                                 break
                     self.history.append(previous.track)
-                    if self.loop_mode == LoopMode.QUEUE:
-                        self.queue.append(previous.track)
+                    self._requeue(previous.track)
+                    self._autoplay_failures = 0
                     self._current = following.track
                     self._source = following.source
                     self._active_slot = following
@@ -409,8 +424,8 @@ class GuildPlayer:
                             self._current = None
                             self._offset = 0
                             self.history.append(ended.track)
-                            if self.loop_mode == LoopMode.QUEUE:
-                                self.queue.append(ended.track)
+                            self._requeue(ended.track)
+                        self._autoplay_failures = 0
                         self._source = None
                         self._active_slot = None
                         self._retries = 0
@@ -423,6 +438,21 @@ class GuildPlayer:
         if changed and not self.closed:
             self.refresh(self)
             self._schedule_next_decode()
+
+    def _requeue(self, track: Track) -> None:
+        """Return a finished or skipped track to the queue for queue repeat."""
+        if self.loop_mode != LoopMode.QUEUE:
+            return
+        size = len(self.queue)
+        if self.shuffle and size:
+            # Mix up each cycle without an immediate replay or displacing the head.
+            self.queue.insert(random.randint(max(1, size // 2), size), track)
+        else:
+            self.queue.append(track)
+
+    def _same_entry(self, first: Track, second: Track) -> bool:
+        # Queue repeat shares one object, but a restored session holds equal copies.
+        return first is second or (self.loop_mode == LoopMode.QUEUE and first == second)
 
     def _invalidate_next(self, *, keep: PlaybackSlot | None = None) -> None:
         stream = self._stream
@@ -765,6 +795,11 @@ class GuildPlayer:
                 self._retries += 1
                 return
             self._retries = 0
+            if reason == "finished":
+                self._autoplay_failures = 0
+            elif reason == "error" and track is self._autoplay_track:
+                self._autoplay_failures += 1
+                self._autoplay_failed.append(track.url)
             if reason == "finished" and self.loop_mode == LoopMode.TRACK:
                 # Repeating the same current track bypasses shuffle and preserves
                 # a faithful checkpoint if shutdown occurs before playback restarts.
@@ -775,8 +810,8 @@ class GuildPlayer:
                 self._offset = 0
                 if reason != "previous" and (reason != "error" or position > track.start_seconds):
                     self.history.append(track)
-                if reason in {"finished", "skip"} and self.loop_mode == LoopMode.QUEUE:
-                    self.queue.append(track)
+                if reason in {"finished", "skip"}:
+                    self._requeue(track)
         self.refresh(self)
         self._request_checkpoint()
 
@@ -784,11 +819,29 @@ class GuildPlayer:
         genre = self.autoplay
         if not genre or genre not in GENRES:
             return False
-        search = asyncio.create_task(self.media.search(GENRES[genre], 15))
+        if self._autoplay_failures >= AUTOPLAY_FAILURE_LIMIT:
+            async with self._lock:
+                if self.autoplay == genre and self._autoplay_failures >= AUTOPLAY_FAILURE_LIMIT:
+                    self.autoplay = None
+                    self._autoplay_failures = 0
+                    self._queue_report(
+                        "Autoplay stopped because several tracks in a row could not play."
+                    )
+            return False
+        delay = 0.0
+        if self._autoplay_failures:
+            delay = AUTOPLAY_RETRY_DELAY * 2 ** (self._autoplay_failures - 1)
+
+        async def find() -> list[Track]:
+            if delay:
+                await asyncio.sleep(delay)
+            return await self.media.search(GENRES[genre], 15)
+
+        search = asyncio.create_task(find())
         self._autoplay_search = search
         try:
             results = await search
-            recent = {track.url for track in self.history}
+            recent = {track.url for track in self.history} | set(self._autoplay_failed)
             candidates = [track for track in results if is_music(track) and track.url not in recent]
             async with self._lock:
                 if self.closed:
@@ -798,9 +851,10 @@ class GuildPlayer:
                 if self.autoplay != genre:
                     return False
                 if candidates:
-                    self.queue.append(
-                        replace(random.choice(candidates), requester_id=self.owner_id)
+                    self._autoplay_track = replace(
+                        random.choice(candidates), requester_id=self.owner_id
                     )
+                    self.queue.append(self._autoplay_track)
                     return True
         except asyncio.CancelledError:
             task = asyncio.current_task()
@@ -820,13 +874,15 @@ class GuildPlayer:
         if self._autoplay_search and not self._autoplay_search.done():
             self._autoplay_search.cancel()
 
-    def _check_open(self) -> None:
+    def _check_open(self, *, guard: Callable[[], Any] | None = None) -> None:
         self._sync_handoffs()
+        if guard is not None:
+            guard()
         if self.closed:
             raise UserError("This playback session has ended. Use /play again.")
 
-    def _check_navigation(self) -> None:
-        self._check_open()
+    def _check_navigation(self, *, guard: Callable[[], Any] | None = None) -> None:
+        self._check_open(guard=guard)
         if self._reason:
             raise UserError(
                 "Wait for the current track to change before skipping or going back again."
@@ -844,10 +900,10 @@ class GuildPlayer:
             self.voice.stop()
         self._wake.set()
 
-    async def skip(self) -> Track:
+    async def skip(self, *, guard: Callable[[], Any] | None = None) -> Track:
         async with self._lock:
             with self._stream.lock if self._stream else nullcontext():
-                self._check_navigation()
+                self._check_navigation(guard=guard)
                 if self.current is None:
                     raise UserError("There is no current track to skip.")
                 track = self.current
@@ -862,26 +918,43 @@ class GuildPlayer:
                 self._interrupt("skip", keep=ready)
                 # Commit accepted navigation before cleanup/checkpoint awaits.
                 self.history.append(track)
-                if self.loop_mode == LoopMode.QUEUE:
-                    self.queue.append(track)
+                self._requeue(track)
                 self.current = None
                 self._offset = 0
                 self._retries = 0
                 return track
 
-    async def previous(self) -> Track:
+    async def previous(self, *, guard: Callable[[], Any] | None = None) -> Track:
         async with self._lock:
             with self._stream.lock if self._stream else nullcontext():
-                self._check_navigation()
+                self._check_navigation(guard=guard)
                 if not self.history:
                     raise UserError("There is no previous track.")
-                if len(self.queue) + bool(self.current) >= self.settings.max_queue:
+                current, selected = self.current, self.history[-1]
+                # Queue repeat has already put this track back. Move that entry
+                # instead of adding another copy on every use.
+                repeating = current is not None and self._same_entry(current, selected)
+                requeued = next(
+                    (
+                        index
+                        for index in reversed(range(len(self.queue)))
+                        if not repeating and self._same_entry(self.queue[index], selected)
+                    ),
+                    None,
+                )
+                if (
+                    not repeating
+                    and requeued is None
+                    and len(self.queue) + bool(current) >= self.settings.max_queue
+                ):
                     raise UserError("The music queue is full. Skip a track before using Previous.")
                 # Validation and source invalidation share the audio boundary lock.
                 self._invalidate_next()
-                if self.current:
-                    self.queue.appendleft(self.current)
-                selected = self.history.pop()
+                if requeued is not None:
+                    del self.queue[requeued]
+                if current and not repeating:
+                    self.queue.appendleft(current)
+                self.history.pop()
                 self.queue.appendleft(selected)
                 self._interrupt("previous")
                 self.current = None
@@ -889,10 +962,16 @@ class GuildPlayer:
         self._schedule_prefetch()
         return selected
 
-    async def seek(self, position: float, *, expected_track: Track | None = None) -> Track:
+    async def seek(
+        self,
+        position: float,
+        *,
+        expected_track: Track | None = None,
+        guard: Callable[[], Any] | None = None,
+    ) -> Track:
         async with self._lock:
             with self._stream.lock if self._stream else nullcontext():
-                self._check_navigation()
+                self._check_navigation(guard=guard)
                 track = self.current
                 if track is None:
                     raise UserError("There is no current track to seek.")
@@ -924,60 +1003,102 @@ class GuildPlayer:
         await self._persist_safely()
         return track
 
-    async def _apply_pause(self, reason: str, enabled: bool) -> Track | None:
+    async def _apply_pause(
+        self, reason: str, enabled: bool, *, guard: Callable[[], Any] | None = None
+    ) -> Track | None:
         async with self._lock:
             with self._stream.lock if self._stream else nullcontext():
-                self._check_open()
-                accepted_track = self.current
-                if enabled:
-                    self.pause_reasons.add(reason)
-                else:
-                    self.pause_reasons.discard(reason)
-                voice = self.voice
-                if voice:
-                    if self.pause_reasons and voice.is_playing():
-                        voice.pause()
-                    elif not self.pause_reasons and voice.is_paused():
-                        if self._source:
-                            self._source.reset_clock()
-                        voice.resume()
+                self._check_open(guard=guard)
+                accepted_track = self._set_pause(reason, enabled)
         return accepted_track
 
-    async def pause(self, reason: str, enabled: bool) -> Track | None:
-        accepted_track = await self._apply_pause(reason, enabled)
+    def _set_pause(self, reason: str, enabled: bool) -> Track | None:
+        """Apply a pause reason while the player and audio-boundary locks are held."""
+        accepted_track = self.current
+        if enabled:
+            self.pause_reasons.add(reason)
+        else:
+            self.pause_reasons.discard(reason)
+        voice = self.voice
+        if voice:
+            if self.pause_reasons and voice.is_playing():
+                voice.pause()
+            elif not self.pause_reasons and voice.is_paused():
+                if self._source:
+                    self._source.reset_clock()
+                voice.resume()
+        return accepted_track
+
+    async def pause(
+        self, reason: str, enabled: bool, *, guard: Callable[[], Any] | None = None
+    ) -> Track | None:
+        accepted_track = await self._apply_pause(reason, enabled, guard=guard)
         self.refresh(self)
         await self._persist_safely()
         return accepted_track
 
-    async def set_volume(self, value: int) -> None:
+    async def toggle_pause(
+        self, *, guard: Callable[[], Any] | None = None
+    ) -> tuple[Track | None, bool, bool]:
+        async with self._lock:
+            with self._stream.lock if self._stream else nullcontext():
+                self._check_open(guard=guard)
+                enabled = "manual" not in self.pause_reasons
+                accepted_track = self._set_pause("manual", enabled)
+                paused_after = self.paused
+        self.refresh(self)
+        await self._persist_safely()
+        return accepted_track, enabled, paused_after
+
+    async def set_volume(self, value: int, *, guard: Callable[[], Any] | None = None) -> None:
         if not 0 <= value <= 100:
             raise UserError("Volume must be an integer between 0 and 100.")
         async with self._lock:
-            self._check_open()
-            self.volume = value
-            if self._source:
-                self._source.volume = value / 100
-            if self._next_slot:
-                self._next_slot.source.volume = value / 100
+            with self._stream.lock if self._stream else nullcontext():
+                self._check_open(guard=guard)
+                self.volume = value
+                if self._source:
+                    self._source.volume = value / 100
+                if self._next_slot:
+                    self._next_slot.source.volume = value / 100
         self.refresh(self)
         await self._persist_safely()
 
-    async def set_loop(self, mode: LoopMode) -> None:
+    async def set_loop(self, mode: LoopMode, *, guard: Callable[[], Any] | None = None) -> None:
         async with self._lock:
-            self._invalidate_next()
-            self._check_open()
-            self.loop_mode = mode
+            with self._stream.lock if self._stream else nullcontext():
+                self._check_open(guard=guard)
+                self._invalidate_next()
+                self.loop_mode = mode
         self._schedule_next_decode()
         self.refresh(self)
         await self._persist_safely()
 
-    async def set_autoplay(self, genre: str | None) -> None:
+    async def cycle_loop(self, *, guard: Callable[[], Any] | None = None) -> LoopMode:
+        async with self._lock:
+            with self._stream.lock if self._stream else nullcontext():
+                self._check_open(guard=guard)
+                self._invalidate_next()
+                modes = list(LoopMode)
+                mode = modes[(modes.index(self.loop_mode) + 1) % len(modes)]
+                self.loop_mode = mode
+        self._schedule_next_decode()
+        self.refresh(self)
+        await self._persist_safely()
+        return mode
+
+    async def set_autoplay(
+        self, genre: str | None, *, guard: Callable[[], Any] | None = None
+    ) -> None:
         if genre is not None and genre not in GENRES:
             raise UserError("Choose a supported autoplay genre.")
         async with self._lock:
-            self._check_open()
-            changed = self.autoplay != genre
-            self.autoplay = genre
+            with self._stream.lock if self._stream else nullcontext():
+                self._check_open(guard=guard)
+                changed = self.autoplay != genre
+                self.autoplay = genre
+                self._autoplay_failures = 0
+                self._autoplay_failed.clear()
         if changed:
             self._cancel_autoplay_search()
         if genre:
@@ -986,19 +1107,21 @@ class GuildPlayer:
         self.refresh(self)
         await self._persist_safely()
 
-    async def toggle_shuffle(self) -> None:
+    async def toggle_shuffle(self, *, guard: Callable[[], Any] | None = None) -> bool:
         async with self._lock:
-            self._invalidate_next()
-            self._check_open()
-            self.shuffle = not self.shuffle
-            if self.shuffle:
-                shuffled = list(self.queue)
-                random.shuffle(shuffled)
-                self.queue = deque(shuffled)
+            with self._stream.lock if self._stream else nullcontext():
+                self._check_open(guard=guard)
+                self._invalidate_next()
+                enabled = self.shuffle = not self.shuffle
+                if enabled:
+                    shuffled = list(self.queue)
+                    random.shuffle(shuffled)
+                    self.queue = deque(shuffled)
         self._schedule_prefetch()
         self._schedule_next_decode()
         self.refresh(self)
         await self._persist_safely()
+        return enabled
 
     def _schedule_lyrics(self, track: Track, generation: int) -> None:
         if self._lyrics_task:
@@ -1075,18 +1198,32 @@ class GuildPlayer:
         async def recover() -> None:
             try:
                 await self.pause("connection", True)
-                async with asyncio.timeout(grace_seconds):
+                async with asyncio.timeout(grace_seconds) as deadline:
                     while not self.closed:
                         voice = self.voice
                         me = self.guild.me
                         if voice and voice.is_connected() and me and me.voice and me.voice.channel:
                             self.voice_channel = voice.channel
+                            self._rejoin_requested = False
                             await self.pause("connection", False)
                             await self.listeners_changed(
                                 any(not member.bot for member in self.voice_channel.members)
                             )
                             log.info("Voice session recovered in server %s", self.guild.id)
                             return
+                        if voice is None and self._rejoin_requested:
+                            # A removed bot has no client left to recover. It must
+                            # not return by itself, but a new request asks it to.
+                            self._rejoin_requested = False
+                            deadline.reschedule(asyncio.get_running_loop().time() + grace_seconds)
+                            try:
+                                await self._open_voice()
+                            except Exception:
+                                log.warning(
+                                    "Voice could not be rejoined in server %s",
+                                    self.guild.id,
+                                    exc_info=True,
+                                )
                         # The library owns the reconnect; observe its public state without
                         # starting a competing connection or requesting new gateway data.
                         await asyncio.sleep(0.25)  # noqa: ASYNC110
@@ -1114,23 +1251,27 @@ class GuildPlayer:
     async def snapshot(self) -> dict[str, Any]:
         async with self._lock:
             with self._stream.lock if self._stream else nullcontext():
-                self._sync_handoffs()
-                return {
-                    "guild_id": self.guild.id,
-                    "voice_channel_id": self.voice_channel.id,
-                    "text_channel_id": self.text_channel.id,
-                    "message_id": self.message.id if self.message else None,
-                    "current": self.current.to_dict() if self.current else None,
-                    "queue": [track.to_dict() for track in self.queue],
-                    "history": [track.to_dict() for track in self.history],
-                    "position": self.position,
-                    "volume": self.volume,
-                    "loop": self.loop_mode.value,
-                    "shuffle": self.shuffle,
-                    "autoplay": self.autoplay,
-                    "manual_pause": "manual" in self.pause_reasons,
-                    "owner_id": self.owner_id,
-                }
+                return self._snapshot_state()
+
+    def _snapshot_state(self) -> dict[str, Any]:
+        """Copy state while the caller holds the player and audio-boundary locks."""
+        self._sync_handoffs()
+        return {
+            "guild_id": self.guild.id,
+            "voice_channel_id": self.voice_channel.id,
+            "text_channel_id": self.text_channel.id,
+            "message_id": self.message.id if self.message else None,
+            "current": self.current.to_dict() if self.current else None,
+            "queue": [track.to_dict() for track in self.queue],
+            "history": [track.to_dict() for track in self.history],
+            "position": self.position,
+            "volume": self.volume,
+            "loop": self.loop_mode.value,
+            "shuffle": self.shuffle,
+            "autoplay": self.autoplay,
+            "manual_pause": "manual" in self.pause_reasons,
+            "owner_id": self.owner_id,
+        }
 
     def log_health(self) -> None:
         source = self._source
@@ -1314,15 +1455,51 @@ class GuildPlayer:
                 log.exception("Could not snapshot closing player for server %s", self.guild.id)
                 snapshot = None
                 snapshot_failed = True
-            # Snapshot acquisition can itself wait for the player state lock.
-            # Revalidate once more immediately before the irreversible state change.
-            if guard is not None:
-                guard()
-            self.closed = True
-            self.status = "ended"
-            self._reason = "stop"
-            self._generation += 1
-            self._checkpoint_dirty = False
+            # An audio boundary may have crossed while the initial snapshot
+            # waited. Reconcile, authorize and capture the final recovery state
+            # in the same critical section as the close commit.
+            async with self._lock:
+                with self._stream.lock if self._stream else nullcontext():
+                    self._sync_handoffs()
+                    if guard is not None:
+                        guard()
+                    if preserve and not snapshot_failed:
+                        try:
+                            snapshot = self._snapshot_state()
+                        except Exception:
+                            log.exception(
+                                "Could not snapshot closing player for server %s", self.guild.id
+                            )
+                            snapshot = None
+                            snapshot_failed = True
+                    self.closed = True
+                    self.status = "ended"
+                    self._reason = "stop"
+                    self._generation += 1
+                    self._checkpoint_dirty = False
+        closing = asyncio.create_task(
+            self._finish_close(snapshot, snapshot_failed, caller=asyncio.current_task())
+        )
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(closing)
+                break
+            except asyncio.CancelledError:
+                if closing.cancelled():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _finish_close(
+        self,
+        snapshot: dict[str, Any] | None,
+        snapshot_failed: bool,
+        *,
+        caller: asyncio.Task[Any] | None,
+    ) -> None:
+        """Finish committed shutdown even if its original caller is cancelled."""
         self._invalidate_next()
         tasks = [
             self._worker,
@@ -1338,9 +1515,8 @@ class GuildPlayer:
             self._reconnect,
             self._notification_task,
         ]
-        current_task = asyncio.current_task()
         for task in tasks:
-            if task and task is not current_task:
+            if task and task is not caller:
                 task.cancel()
         if self.voice:
             try:
@@ -1348,12 +1524,15 @@ class GuildPlayer:
             except Exception:
                 log.exception("Could not stop audio for server %s", self.guild.id)
         await asyncio.gather(
-            *(task for task in tasks if task and task is not current_task), return_exceptions=True
+            *(task for task in tasks if task and task is not caller), return_exceptions=True
         )
         for slot in list(self._slots):
             self._start_retirement(slot)
-        while self._retiring:
-            await asyncio.gather(*list(self._retiring), return_exceptions=True)
+        while retiring := list(self._retiring):
+            await asyncio.gather(*retiring, return_exceptions=True)
+            # gather() does not yield when every task has already finished, so
+            # their own discard callbacks may never get a chance to run.
+            self._retiring.difference_update(retiring)
         self._notifications.clear()
         self._notification_recent.clear()
         self._notification_overflow = 0

@@ -99,7 +99,7 @@ def _read_store(path: Path, client_id: str) -> dict[str, str]:
         }
     except MediaError:
         raise
-    except OSError, ValueError, TypeError:
+    except OSError, ValueError, TypeError, RecursionError:
         raise MediaError("The saved Spotify sign-in cannot be read. " + _RECONNECT) from None
 
 
@@ -139,7 +139,7 @@ async def _token_request(session: aiohttp.ClientSession, data: dict[str, str]) -
                     raise MediaError("Spotify returned too much authentication data.")
             try:
                 result = json.loads(body)
-            except ValueError:
+            except ValueError, RecursionError:
                 raise MediaError("Spotify returned invalid authentication data.") from None
             if not isinstance(result, dict):
                 raise MediaError("Spotify returned invalid authentication data.")

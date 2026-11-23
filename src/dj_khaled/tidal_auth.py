@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -71,7 +71,7 @@ def _read_store(path: Path) -> dict[str, Any]:
         if len(body) > _LIMIT:
             raise ValueError("Oversized credentials.")
         return _credentials(json.loads(body))
-    except OSError, ValueError, TypeError, OverflowError:
+    except OSError, ValueError, TypeError, OverflowError, RecursionError:
         raise MediaError("The saved TIDAL sign-in cannot be read. " + _RECONNECT) from None
 
 
@@ -130,7 +130,7 @@ def _response_data(response: requests.Response) -> dict[str, Any]:
         raise MediaError("TIDAL returned too much authentication data.")
     try:
         data = response.json()
-    except ValueError:
+    except ValueError, RecursionError:
         raise MediaError("TIDAL returned invalid authentication data.") from None
     if not isinstance(data, dict):
         raise MediaError("TIDAL returned invalid authentication data.")
@@ -144,11 +144,14 @@ class _BoundedRequests(requests.Session):
 
 
 class _TidalSession(tidalapi.Session):
-    def __init__(self, quality: str, persist: Callable[[tidalapi.Session], None]) -> None:
+    def __init__(
+        self, quality: str, persist: Callable[[tidalapi.Session], None], *, read_only: bool = False
+    ) -> None:
         super().__init__(tidalapi.Config(quality=quality))
         self.request_session.close()
         self.request_session = _BoundedRequests()
         self._persist = persist
+        self.read_only = read_only
         self._refresh_budget = 2
         # The SDK logs request URLs containing account session IDs on failures.
         logging.getLogger("tidalapi").setLevel(logging.CRITICAL)
@@ -156,6 +159,8 @@ class _TidalSession(tidalapi.Session):
     def token_refresh(self, refresh_token: str) -> bool:
         # tidalapi 0.8.11 discards rotated refresh tokens. Persist the complete
         # replacement before returning to the API call that triggered refresh.
+        if self.read_only:
+            raise MediaError("TIDAL authentication needs permission to save rotated credentials.")
         if self._refresh_budget <= 0:
             raise MediaError("TIDAL sign-in could not be refreshed. " + _RECONNECT)
         self._refresh_budget -= 1
@@ -202,8 +207,9 @@ class _TidalSession(tidalapi.Session):
 
 
 class TidalUserAuth:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, read_only: bool = False) -> None:
         self.settings = settings
+        self.read_only = read_only
         self.path = settings.data_directory / "tidal-auth.json"
         self._lock = threading.Lock()
         self._session: _TidalSession | None = None
@@ -215,14 +221,17 @@ class TidalUserAuth:
 
     def _persist(self, session: tidalapi.Session) -> None:
         data = _session_credentials(session)
-        _write_store(self.path, data)
+        if not self.read_only:
+            _write_store(self.path, data)
         self._saved = data
 
     def _load(self, data: dict[str, Any]) -> _TidalSession:
         if self._session is not None:
             self._session.request_session.close()
             self._session = None
-        session = _TidalSession(self.settings.tidal_quality, self._persist)
+        session = _TidalSession(
+            self.settings.tidal_quality, self._persist, read_only=self.read_only
+        )
         try:
             session.token_type = data["token_type"]
             session.access_token = data["access_token"]
@@ -254,7 +263,8 @@ class TidalUserAuth:
             session.token_refresh(session.refresh_token)
 
     def run[T](self, operation: Callable[[tidalapi.Session], T]) -> T:
-        with self._lock, _store_lock(self.settings):
+        transaction = nullcontext() if self.read_only else _store_lock(self.settings)
+        with self._lock, transaction:
             if not self.configured:
                 raise MediaError("TIDAL is not connected. " + _RECONNECT)
             try:

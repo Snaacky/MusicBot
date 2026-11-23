@@ -111,7 +111,11 @@ def register_commands(bot: DJKhaled) -> None:
             raise UserError("There is no track playing in this server.")
         expected_track = player.current
         bot.authorize(interaction, player, control=True)
-        track = await player.seek(seconds, expected_track=expected_track)
+        track = await player.seek(
+            seconds,
+            expected_track=expected_track,
+            guard=lambda: bot.authorize(interaction, player, control=True),
+        )
         player.note(
             user_action(interaction.user, f"jumped to {duration_text(seconds)} in {track.title}.")
         )

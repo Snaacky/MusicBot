@@ -17,7 +17,7 @@ from .config import Settings
 from .i18n import Languages
 from .icons import load_control_icons
 from .lyrics import LyricsService
-from .media import MediaResolver, PublicResolver
+from .media import MediaResolver, public_connector
 from .models import Track, UserError
 from .player import GuildPlayer
 from .status_api import YouTubeStatusServer
@@ -67,6 +67,9 @@ class DJKhaled(discord.AutoShardedClient):
         self._refresh_slow_until: dict[str, float] = {}
         self._component_interactions: dict[str, discord.Interaction] = {}
         self._component_tasks: dict[asyncio.Task[bool], str] = {}
+        self._publish_tasks: dict[asyncio.Task[bool], str] = {}
+        self._publish_in_flight: set[asyncio.Task[bool]] = set()
+        self._removal_tasks: dict[str, asyncio.Task[None]] = {}
         self._refresh_failures: dict[str, int] = {}
         self._control_revision: dict[str, int] = {}
         self._rendered: dict[str, tuple[Any, ...]] = {}
@@ -77,6 +80,7 @@ class DJKhaled(discord.AutoShardedClient):
         self._restore_lock = asyncio.Lock()
         self._closing = False
         self._close_lock = asyncio.Lock()
+        self._close_task: asyncio.Task[None] | None = None
         self.web: aiohttp.ClientSession | None = None
         self.youtube_status: YouTubeStatusServer | None = None
         self.media: MediaResolver
@@ -90,7 +94,7 @@ class DJKhaled(discord.AutoShardedClient):
         await self.store.initialize()
         await self.store.import_legacy(self.settings.root / "database")
         self.web = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(resolver=PublicResolver(), ttl_dns_cache=60, limit=16),
+            connector=public_connector(ttl_dns_cache=60, limit=16),
             timeout=aiohttp.ClientTimeout(total=120, connect=15, sock_read=30),
             headers={"User-Agent": "DJ-Khaled/1.0 (Discord music bot)"},
         )
@@ -231,7 +235,7 @@ class DJKhaled(discord.AutoShardedClient):
         channel = (
             guild.voice_client.channel
             if guild.voice_client
-            else (player.voice_channel if player else None)
+            else (player.voice_channel if player and not player.closed else None)
         )
         if channel and channel.id != member.voice.channel.id:
             raise UserError("Join the same voice channel as the bot.")
@@ -246,7 +250,8 @@ class DJKhaled(discord.AutoShardedClient):
         if interaction.guild_id != player.guild.id:
             raise UserError("This control belongs to another server.")
         if control:
-            requester = player.current.requester_id if player.current else player.owner_id
+            current = player.current
+            requester = current.requester_id if current else player.owner_id
             role_permission = any(
                 role.id in self.settings.dj_roles
                 if self.settings.dj_roles
@@ -291,7 +296,7 @@ class DJKhaled(discord.AutoShardedClient):
                 raise UserError("The bot is shutting down. Please try again shortly.")
             member = self.validate_voice(interaction)
             player = self.players.get(interaction.guild_id)
-            if player is None:
+            if player is None or player.closed:
                 if not tracks:
                     raise UserError("No playable tracks were found.")
                 player = self._new_player(
@@ -308,54 +313,73 @@ class DJKhaled(discord.AutoShardedClient):
         guard: Callable[[], Any] | None = None,
         notice: str = "Disconnected. Queue cleared.",
     ) -> None:
-        async with self._guild_lock(player.guild.id):
-            if guard is not None:
-                guard()
-            if self.players.get(player.guild.id) is not player:
-                return
-            try:
-                if guard is None:
-                    await player.close()
-                else:
-                    await player.close(guard=guard)
-            finally:
-                # A late authorization rejection can happen after waiting on the
-                # player's save/close locks. Keep that still-open session usable.
-                if player.closed:
-                    player.note(notice)
-                    task = self._refresh_tasks.pop(player.session_id, None)
-                    if task and task is not asyncio.current_task():
-                        task.cancel()
-                        await asyncio.gather(task, return_exceptions=True)
-                    await asyncio.gather(
-                        *(
-                            asyncio.shield(task)
-                            for task, session_id in list(self._component_tasks.items())
-                            if session_id == player.session_id
-                            and task is not asyncio.current_task()
-                        ),
-                        return_exceptions=True,
-                    )
-                    self._refresh_pending.discard(player.session_id)
-                    if view := self._views.pop(player.session_id, None):
-                        view.stop()
-                    try:
-                        await self.publish(player, urgent=True)
-                    finally:
-                        self.players.pop(player.guild.id, None)
-                        for mapping in (
-                            self._refresh_after,
-                            self._refresh_backoff,
-                            self._refresh_wake,
-                            self._refresh_interval,
-                            self._refresh_slow_until,
-                            self._component_interactions,
-                            self._refresh_failures,
-                            self._control_revision,
-                            self._rendered,
-                        ):
-                            mapping.pop(player.session_id, None)
-                        self._refresh_urgent.discard(player.session_id)
+        task = None
+        try:
+            async with self._guild_lock(player.guild.id):
+                if guard is not None:
+                    guard()
+                if self.players.get(player.guild.id) is not player:
+                    return
+                task = self._removal_tasks.get(player.session_id)
+                if task is not None:
+                    return
+                try:
+                    if guard is None:
+                        await player.close()
+                    else:
+                        await player.close(guard=guard)
+                finally:
+                    # A late authorization rejection can happen after waiting on the
+                    # player's save/close locks. Keep that still-open session usable.
+                    if player.closed:
+                        task = asyncio.create_task(
+                            self._finish_removal(player, notice), name="player-removal"
+                        )
+                        self._removal_tasks[player.session_id] = task
+        finally:
+            # The ended card can wait for a Discord retry deadline. A new session
+            # may start meanwhile, so this must not hold the server lock.
+            if task is not None:
+                try:
+                    await self._await_ui_transaction(task)
+                finally:
+                    self._removal_tasks.pop(player.session_id, None)
+
+    async def _finish_removal(self, player: GuildPlayer, notice: str) -> None:
+        player.note(notice)
+        task = self._refresh_tasks.pop(player.session_id, None)
+        if task and task is not asyncio.current_task():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await asyncio.gather(
+            *(
+                asyncio.shield(task)
+                for task, session_id in list(self._component_tasks.items())
+                if session_id == player.session_id and task is not asyncio.current_task()
+            ),
+            return_exceptions=True,
+        )
+        self._refresh_pending.discard(player.session_id)
+        if view := self._views.pop(player.session_id, None):
+            view.stop()
+        try:
+            await self.publish(player, urgent=True)
+        finally:
+            if self.players.get(player.guild.id) is player:
+                self.players.pop(player.guild.id)
+            for mapping in (
+                self._refresh_after,
+                self._refresh_backoff,
+                self._refresh_wake,
+                self._refresh_interval,
+                self._refresh_slow_until,
+                self._component_interactions,
+                self._refresh_failures,
+                self._control_revision,
+                self._rendered,
+            ):
+                mapping.pop(player.session_id, None)
+            self._refresh_urgent.discard(player.session_id)
 
     def _signal_urgent_refresh(self, session_id: str) -> None:
         self._refresh_urgent.add(session_id)
@@ -389,6 +413,43 @@ class DJKhaled(discord.AutoShardedClient):
     async def publish(
         self, player: GuildPlayer, *, force: bool = False, urgent: bool = False
     ) -> bool:
+        if self._closing:
+            return False
+        task = asyncio.create_task(
+            self._publish_regular(player, force=force, urgent=urgent), name="player-card-publish"
+        )
+        self._publish_tasks[task] = player.session_id
+        try:
+            return await self._await_ui_transaction(task, cancel_unstarted=True)
+        finally:
+            self._publish_tasks.pop(task, None)
+            self._publish_in_flight.discard(task)
+
+    async def _await_ui_transaction[T](
+        self, task: asyncio.Task[T], *, cancel_unstarted: bool = False
+    ) -> T:
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+                cancelled = True
+                if cancel_unstarted and task not in self._publish_in_flight:
+                    task.cancel()
+            except Exception:
+                if cancelled:
+                    raise asyncio.CancelledError from None
+                raise
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def _publish_regular(
+        self, player: GuildPlayer, *, force: bool = False, urgent: bool = False
+    ) -> bool:
         session_id = player.session_id
         if urgent:
             # Wake a progress refresh already waiting while holding ui_lock.
@@ -420,6 +481,7 @@ class DJKhaled(discord.AutoShardedClient):
             # the HTTP request is in flight keeps its flag for the next refresh.
             self._refresh_urgent.discard(session_id)
             wake.clear()
+            self._publish_in_flight.add(asyncio.current_task())
             try:
                 return await self._publish(player, force=force)
             finally:
@@ -519,23 +581,8 @@ class DJKhaled(discord.AutoShardedClient):
             name="player-component-publish",
         )
         self._component_tasks[task] = player.session_id
-        cancelled = False
         try:
-            while True:
-                try:
-                    result = await asyncio.shield(task)
-                    break
-                except asyncio.CancelledError:
-                    if task.cancelled():
-                        raise
-                    cancelled = True
-                except Exception:
-                    if cancelled:
-                        raise asyncio.CancelledError from None
-                    raise
-            if cancelled:
-                raise asyncio.CancelledError
-            return result
+            return await self._await_ui_transaction(task)
         finally:
             self._component_tasks.pop(task, None)
             response_type = getattr(interaction.response, "type", None)
@@ -811,7 +858,7 @@ class DJKhaled(discord.AutoShardedClient):
                 "Playback UI is waiting for Discord's rate limit in server %s", player.guild.id
             )
             return False
-        except discord.HTTPException:
+        except discord.HTTPException, aiohttp.ClientError, OSError:
             failures = min(5, self._refresh_failures.get(session_id, 0) + 1)
             self._refresh_failures[session_id] = failures
             self._refresh_backoff[session_id] = asyncio.get_running_loop().time() + min(
@@ -905,17 +952,22 @@ class DJKhaled(discord.AutoShardedClient):
                 await interaction.followup.send(message[:1900], ephemeral=True)
             else:
                 await interaction.response.send_message(message[:1900], ephemeral=True)
-        except discord.HTTPException:
+        except discord.HTTPException, aiohttp.ClientError, OSError:
             log.debug("The interaction expired before an error response could be sent.")
 
     async def close(self) -> None:
         async with self._close_lock:
-            await self._close()
+            if self._close_task is None:
+                self._close_task = asyncio.create_task(self._close(), name="bot-shutdown")
+            await self._await_ui_transaction(self._close_task)
 
     async def _close(self) -> None:
         if self._closing:
             return
         self._closing = True
+        for task in self._publish_tasks:
+            if task not in self._publish_in_flight:
+                task.cancel()
         if self._progress_task:
             self._progress_task.cancel()
             await asyncio.gather(self._progress_task, return_exceptions=True)
@@ -930,6 +982,11 @@ class DJKhaled(discord.AutoShardedClient):
         for player, result in zip(players, results, strict=True):
             if isinstance(result, BaseException):
                 log.error("Player shutdown failed for server %s: %s", player.guild.id, result)
+        await asyncio.gather(
+            *(asyncio.shield(task) for task in list(self._removal_tasks.values())),
+            return_exceptions=True,
+        )
+        self._removal_tasks.clear()
         self.players.clear()
         refresh_tasks = list(self._refresh_tasks.values())
         for task in refresh_tasks:
@@ -944,6 +1001,11 @@ class DJKhaled(discord.AutoShardedClient):
             return_exceptions=True,
         )
         self._component_tasks.clear()
+        await asyncio.gather(
+            *(asyncio.shield(task) for task in list(self._publish_tasks)), return_exceptions=True
+        )
+        self._publish_tasks.clear()
+        self._publish_in_flight.clear()
         for view in self._views.values():
             view.stop()
         self._views.clear()
